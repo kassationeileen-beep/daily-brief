@@ -120,39 +120,27 @@ def fetch_southbound_flow() -> dict:
     """南向资金（港股通）净流入，单位亿港元"""
     import akshare as ak
     result = {"net_flow_hkd_100m": None, "direction": None, "error": None}
-
-    # 方法一：stock_hsgt_fund_flow_summary_em
     try:
-        df = ak.stock_hsgt_fund_flow_summary_em()
+        # 方法一：hsgt_fund_flow_summary_em
+        df = ak.stock_hsgt_fund_flow_summary_em(indicator="南向资金")
         if df is not None and not df.empty:
-            logger.debug(f"[Southbound-v1] 列名: {list(df.columns)}, 行数: {len(df)}")
-            south_row = None
-            for col in df.columns:
-                mask = df[col].astype(str).str.contains("南", na=False)
-                if mask.any():
-                    south_row = df[mask].iloc[0]
-                    break
-            if south_row is None:
-                south_row = df.iloc[-1]
-            for col in ["今日净流入（亿元）", "净流入（亿）", "当日净买入（亿元）",
-                        "净买入（亿元）", "当日净流入", "净流入"]:
+            row = df.iloc[-1]
+            for col in ["今日净流入（亿元）", "净流入（亿）", "当日净买入（亿元）", "净买入"]:
                 if col in df.columns:
-                    val = float(south_row[col])
+                    val = float(row[col])
                     result["net_flow_hkd_100m"] = abs(round(val, 2))
                     result["direction"] = "買入" if val >= 0 else "賣出"
                     return result
-            logger.warning(f"[Southbound] 未找到净流入列，实际列名: {list(df.columns)}")
     except Exception as e:
         logger.debug(f"[Southbound-v1] {e}")
 
-    # 方法二：stock_hsgt_hist_em
     try:
-        df = ak.stock_hsgt_hist_em(symbol="南向资金")
+        # 方法二：stock_em_hsgt_north_net_flow_in（接口有南向选项）
+        df = ak.stock_em_hsgt_north_net_flow_in(indicator="南向资金")
         if df is not None and not df.empty:
-            logger.debug(f"[Southbound-v2] 列名: {list(df.columns)}")
             row = df.iloc[-1]
             for col in df.columns:
-                if "净" in str(col):
+                if "净" in col or "flow" in col.lower():
                     val = float(row[col])
                     result["net_flow_hkd_100m"] = abs(round(val, 2))
                     result["direction"] = "買入" if val >= 0 else "賣出"
