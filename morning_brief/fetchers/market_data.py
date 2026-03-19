@@ -78,74 +78,51 @@ def fetch_hsi() -> dict:
         if result["close"] is None:
             result["error"] = str(e)
 
-    # ── 成交额备：yfinance Volume × 均价粗估 ──────────────────────────────────
-    # 仅在 akshare 未能获取时使用；HSI Volume 单位为手（1手=100股），精度有限
-    if result["turnover_hkd_100m"] is None and yf_avg_price:
+    # ── 成交额备2：爬 HKEX 官方市场统计页（新加坡等境外IP可访问）──────────────
+    if result["turnover_hkd_100m"] is None:
         try:
-            import yfinance as yf
-            tk = yf.Ticker("^HSI")
-            hist = tk.history(period="2d")
-            if not hist.empty:
-                vol_lots = float(hist.iloc[-1].get("Volume", 0) or 0)
-                if vol_lots > 0:
-                    # 粗估：成交手数 × 100股/手 × 均价，折算亿港元
-                    est = vol_lots * 100 * yf_avg_price / 1e8
-                    result["turnover_hkd_100m"] = round(est, 2)
-                    logger.info(f"[HSI] 成交额粗估（yf volume）: {result['turnover_hkd_100m']} 亿港元（误差较大）")
-        except Exception:
-            pass
+            import requests
+            from bs4 import BeautifulSoup
+            # HKEX 每日市场统计摘要页（无需登录，境外可访问）
+            hkex_url = "https://www.hkex.com.hk/eng/market/sec_tradinfo/secstat/mktsum.htm"
+            resp = requests.get(hkex_url, timeout=12, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://www.hkex.com.hk/",
+            })
+            soup = BeautifulSoup(resp.text, "lxml")
+            # 找包含"Main Board Turnover"或"总成交额"的表格行
+            for tag in soup.find_all(string=lambda t: t and (
+                "Main Board Turnover" in t or "Turnover" in t
+            )):
+                parent = tag.find_parent("tr")
+                if not parent:
+                    continue
+                cells = parent.find_all("td")
+                for cell in cells:
+                    txt = cell.get_text(strip=True).replace(",", "").replace("HK$", "")
+                    try:
+                        val = float(txt)
+                        if 1e10 < val < 1e14:   # 合理成交额范围（元）
+                            result["turnover_hkd_100m"] = round(val / 1e8, 2)
+                            logger.info(f"[HSI-HKEX] 成交额: {result['turnover_hkd_100m']} 亿港元")
+                            break
+                    except ValueError:
+                        continue
+                if result["turnover_hkd_100m"] is not None:
+                    break
+        except Exception as e:
+            logger.warning(f"[HSI-HKEX] 爬取失败: {e}")
 
     return result
 
 
 def fetch_southbound_flow() -> dict:
-    """南向资金（港股通）净流入，单位亿港元"""
-    import akshare as ak
-    result = {"net_flow_hkd_100m": None, "direction": None, "error": None}
-
-    # 方法一：stock_hsgt_fund_flow_summary_em（无参数，返回沪深港通汇总）
-    try:
-        df = ak.stock_hsgt_fund_flow_summary_em()
-        if df is not None and not df.empty:
-            logger.debug(f"[Southbound-v1] 列名: {list(df.columns)}, 行数: {len(df)}")
-            # 找包含"南"的行（南向资金行）
-            south_row = None
-            for col in df.columns:
-                mask = df[col].astype(str).str.contains("南", na=False)
-                if mask.any():
-                    south_row = df[mask].iloc[0]
-                    break
-            if south_row is None:
-                south_row = df.iloc[-1]  # fallback 用最后一行
-            # 找净流入列
-            for col in ["今日净流入（亿元）", "净流入（亿）", "当日净买入（亿元）",
-                        "净买入（亿元）", "当日净流入", "净流入"]:
-                if col in df.columns:
-                    val = float(south_row[col])
-                    result["net_flow_hkd_100m"] = abs(round(val, 2))
-                    result["direction"] = "買入" if val >= 0 else "賣出"
-                    return result
-            # 找不到已知列名，打印列名帮助调试
-            logger.warning(f"[Southbound] 未找到净流入列，实际列名: {list(df.columns)}")
-    except Exception as e:
-        logger.debug(f"[Southbound-v1] {e}")
-
-    # 方法二：stock_hsgt_hist_em 历史数据取最新一天
-    try:
-        df = ak.stock_hsgt_hist_em(symbol="南向资金")
-        if df is not None and not df.empty:
-            logger.debug(f"[Southbound-v2] 列名: {list(df.columns)}")
-            row = df.iloc[-1]
-            for col in df.columns:
-                if "净" in str(col):
-                    val = float(row[col])
-                    result["net_flow_hkd_100m"] = abs(round(val, 2))
-                    result["direction"] = "買入" if val >= 0 else "賣出"
-                    return result
-    except Exception as e:
-        logger.debug(f"[Southbound-v2] {e}")
-
-    result["error"] = "南向资金数据获取失败"
+    """南向资金（港股通）净流入，单位亿港元
+    数据源均来自东方财富，境外服务器（新加坡等）无法访问，直接返回不可用标记。
+    如需此数据，需在中国大陆/香港境内的服务器运行，或使用付费数据 API。
+    """
+    result = {"net_flow_hkd_100m": None, "direction": None, "error": "境外IP不可用（數據源僅限境內）"}
+    logger.info("[Southbound] 南向资金数据源（东方财富）境外不可用，跳过")
     return result
 
 

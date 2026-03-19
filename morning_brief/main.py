@@ -96,13 +96,13 @@ def build_brief(
     if hsi.get("error") and not hsi.get("close"):
         hsi_block = warn("恒生指數") + "\n"
 
-    # 南向资金
-    sb_val = fmt_num(sb.get("net_flow_hkd_100m")) if sb.get("net_flow_hkd_100m") else "N/A"
-    sb_dir = sb.get("direction", "N/A")
-    if sb.get("error") and not sb.get("net_flow_hkd_100m"):
-        sb_line = warn("南向資金")
-    else:
+    # 南向资金（东方财富接口，境外服务器不可用时显示 N/A，不报警告）
+    if sb.get("net_flow_hkd_100m") is not None:
+        sb_dir = sb.get("direction", "")
+        sb_val = fmt_num(sb["net_flow_hkd_100m"])
         sb_line = f"- 南向資金（北水）淨{sb_dir}：{sb_val} 億港元"
+    else:
+        sb_line = "- 南向資金（北水）：N/A（境外服務器不可用）"
     hsi_block += sb_line + "\n"
 
     # A股
