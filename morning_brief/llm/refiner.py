@@ -406,15 +406,44 @@ def refine_stock_news(
 # 批量提炼所有个股
 # ─────────────────────────────────────────────
 
-def refine_all_stocks(all_news: dict, llm_interval: float = 1.0) -> list[str]:
+_LLM_OUTPUT_CACHE_PATH = Path(__file__).parent.parent / "output" / ".llm_cache.json"
+
+
+def _load_llm_cache() -> dict:
+    """加载当日 LLM 输出缓存，key=公司名，仅保留今天的记录"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        data = json.loads(_LLM_OUTPUT_CACHE_PATH.read_text(encoding="utf-8"))
+        if data.get("date") == today:
+            return data.get("results", {})
+    except Exception:
+        pass
+    return {}
+
+
+def _save_llm_cache(results: dict) -> None:
+    today = datetime.now().strftime("%Y-%m-%d")
+    _LLM_OUTPUT_CACHE_PATH.parent.mkdir(exist_ok=True)
+    _LLM_OUTPUT_CACHE_PATH.write_text(
+        json.dumps({"date": today, "results": results}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def refine_all_stocks(all_news: dict, llm_interval: float = 1.0, use_cache: bool = True) -> list[str]:
     """
     all_news 结构: {"hk": {...}, "a": {...}, "us": {...}}
     返回: ["🔸腾讯：...", "🔸小米：...", ...]
+
+    use_cache=True（默认）：同一天内重复运行时直接复用已有 LLM 输出，不重复计费。
     """
     seen_events = load_seen_events()
     seen_events = cleanup_old_events(seen_events)
     history_context = get_history_context(seen_events)
     today_str = datetime.now().strftime("%Y-%m-%d")
+
+    # 加载当日缓存
+    llm_cache = _load_llm_cache() if use_cache else {}
 
     outputs = []
     new_event_keywords = []
@@ -430,13 +459,28 @@ def refine_all_stocks(all_news: dict, llm_interval: float = 1.0) -> list[str]:
                 logger.debug(f"  [{name}] 无新闻，跳过")
                 continue
 
+            # 命中缓存：直接复用，不调用 LLM
+            if use_cache and name in llm_cache:
+                cached = llm_cache[name]
+                logger.info(f"  [{name}] 命中当日缓存，跳过 LLM")
+                if cached:
+                    outputs.append(cached)
+                    new_event_keywords.extend(extract_event_keywords(cached))
+                continue
+
             logger.info(f"  提炼 [{name}]（{len(news)} 条，过滤前）...")
             result = refine_stock_news(name, news, history_context,
                                        is_us=is_us, today_str=today_str)
+            # 写入缓存（None 也缓存，避免重复请求无新闻的股票）
+            llm_cache[name] = result
             if result:
                 outputs.append(result)
                 new_event_keywords.extend(extract_event_keywords(result))
             time.sleep(llm_interval)
+
+    # 持久化当日 LLM 缓存
+    if use_cache:
+        _save_llm_cache(llm_cache)
 
     # 更新历史去重记录
     if new_event_keywords:
