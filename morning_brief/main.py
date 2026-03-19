@@ -58,6 +58,14 @@ def warn(label: str) -> str:
 # 早报正文生成
 # ─────────────────────────────────────────────
 
+def _prev_trading_day(dt: datetime) -> datetime:
+    """前一个交易日（仅排除周六日，不处理节假日）"""
+    d = dt - timedelta(days=1)
+    while d.weekday() >= 5:   # 5=Sat, 6=Sun
+        d -= timedelta(days=1)
+    return d
+
+
 def build_brief(
     market_data: dict,
     stock_sections: list[str],
@@ -65,8 +73,9 @@ def build_brief(
     macro_section: str = "",
     ipo_section: str = "",
 ) -> str:
-    date_str = now_hkt.strftime("%Y-%m-%d")
+    date_str = now_hkt.strftime("%Y-%m-%d")           # 今日：用于标题
     date_compact = now_hkt.strftime("%Y%m%d")
+    market_date_str = _prev_trading_day(now_hkt).strftime("%Y-%m-%d")  # 前一交易日：用于第一部分
 
     hsi = market_data.get("hsi") or {}
     sb = market_data.get("southbound") or {}
@@ -115,11 +124,9 @@ def build_brief(
     # 日经
     n_close = fmt_num(n225.get("close"))
     n_pct = fmt_pct(n225.get("pct"))
-    n_vol = fmt_num(n225.get("volume_100m"), decimals=4) if n225.get("volume_100m") else "N/A"
     nikkei_block = (
         f"3. 日經225（日股）\n"
         f"- 收盤價：{n_close} 點（{n_pct}）\n"
-        f"- 成交量：{n_vol}億股\n"
     )
     if n225.get("error") and not n225.get("close"):
         nikkei_block = warn("日經225") + "\n"
@@ -159,7 +166,7 @@ WTI原油：{fxv("WTI", 2)}"""
 
     # ── 拼接完整早报 ──────────────────────────────────────────────────────────
     brief = f"""Good Morning, {date_compact} Daily Brief
-▶️一、*{date_str}核心資金動態*
+▶️一、*{market_date_str}核心資金動態*
 {hsi_block}{a_block}{nikkei_block}
 {fx_block}
 

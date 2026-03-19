@@ -24,12 +24,14 @@ def _safe(fn, label: str):
 
 def fetch_hsi() -> dict:
     """恒生指数：收盘价、涨跌幅、成交额（亿港元）
-    主：yfinance ^HSI（海外服务器稳定）
-    备：akshare stock_hk_index_daily_em（需能访问东方财富）
+    收盘价主：yfinance ^HSI（海外服务器稳定）
+    成交额主：akshare stock_hk_index_daily_em（需能访问东方财富，海外IP可能超时）
+    成交额备：yfinance regularMarketVolume × 近似均价（粗估，误差约5-15%）
     """
     result = {"close": None, "pct": None, "turnover_hkd_100m": None, "error": None}
 
-    # 主：yfinance
+    # ── 收盘价：yfinance ──────────────────────────────────────────────────────
+    yf_avg_price = None   # 用于备用成交额估算
     try:
         import yfinance as yf
         tk = yf.Ticker("^HSI")
@@ -39,44 +41,59 @@ def fetch_hsi() -> dict:
             close = float(row["Close"])
             prev = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
             pct = (close - prev) / prev * 100
-            volume = float(row.get("Volume", 0))
-            # yfinance HSI Volume 单位为手(lot)，成交额需从info取或标注N/A
-            info = tk.info
-            turnover = None
-            # regularMarketVolume * 某均价估算，或直接标注获取不到
-            result.update({
-                "close": round(close, 2),
-                "pct": round(pct, 2),
-                "turnover_hkd_100m": turnover,
-            })
-            logger.debug(f"[HSI] yfinance 成功: {close:.2f}")
-            # 成交额尝试从 akshare 补充
+            yf_avg_price = (float(row["High"]) + float(row["Low"])) / 2
+            result.update({"close": round(close, 2), "pct": round(pct, 2)})
+            logger.debug(f"[HSI] yfinance 收盘: {close:.2f}")
     except Exception as e:
-        logger.debug(f"[HSI-yfinance] {e}")
+        logger.warning(f"[HSI-yfinance] {e}")
 
-    # 补充成交额 / 备用收盘：akshare（可能超时）
+    # ── 成交额主：akshare stock_hk_index_daily_em ─────────────────────────────
+    # 注：海外IP访问东方财富可能超时，失败时自动降级到备用方案
     try:
         import akshare as ak
         df = ak.stock_hk_index_daily_em(symbol="恒生指数")
         if df is not None and not df.empty:
             row = df.iloc[-1]
-            cols = {c.lower(): c for c in df.columns}
-            # 若 yfinance 未取到收盘价则用 akshare
+            logger.debug(f"[HSI-akshare] 列名: {list(df.columns)}")
+            # 若 yfinance 未取到收盘价则补充
             if result["close"] is None:
-                close_col = cols.get("收盘", cols.get("close", list(cols.values())[1]))
-                close = float(row[close_col])
-                prev = float(df.iloc[-2][close_col]) if len(df) > 1 else close
-                result["close"] = round(close, 2)
-                result["pct"] = round((close - prev) / prev * 100, 2)
+                for cname in ["收盘", "close", "Close"]:
+                    if cname in df.columns:
+                        close = float(row[cname])
+                        prev = float(df.iloc[-2][cname]) if len(df) > 1 else close
+                        result["close"] = round(close, 2)
+                        result["pct"] = round((close - prev) / prev * 100, 2)
+                        break
             # 成交额
-            turnover_col = cols.get("成交额", cols.get("amount", None))
-            if turnover_col:
-                raw = float(row[turnover_col])
-                result["turnover_hkd_100m"] = round(raw / 1e8 if raw > 1e8 else raw, 2)
+            for cname in ["成交额", "amount", "Amount", "turnover", "Turnover"]:
+                if cname in df.columns:
+                    raw = float(row[cname])
+                    # akshare 恒生指数 成交额单位通常为亿港元（raw ≈ 1000-2000）
+                    # 若取到原始元值（raw > 1e10），则除以1e8换算
+                    result["turnover_hkd_100m"] = round(raw / 1e8 if raw > 1e10 else raw, 2)
+                    logger.debug(f"[HSI-akshare] 成交额 raw={raw} → {result['turnover_hkd_100m']} 亿港元")
+                    break
     except Exception as e:
-        logger.debug(f"[HSI-akshare] {e}（海外IP访问东方财富超时属正常）")
+        logger.warning(f"[HSI-akshare] 失败（海外IP访问东方财富超时属正常）: {e}")
         if result["close"] is None:
             result["error"] = str(e)
+
+    # ── 成交额备：yfinance Volume × 均价粗估 ──────────────────────────────────
+    # 仅在 akshare 未能获取时使用；HSI Volume 单位为手（1手=100股），精度有限
+    if result["turnover_hkd_100m"] is None and yf_avg_price:
+        try:
+            import yfinance as yf
+            tk = yf.Ticker("^HSI")
+            hist = tk.history(period="2d")
+            if not hist.empty:
+                vol_lots = float(hist.iloc[-1].get("Volume", 0) or 0)
+                if vol_lots > 0:
+                    # 粗估：成交手数 × 100股/手 × 均价，折算亿港元
+                    est = vol_lots * 100 * yf_avg_price / 1e8
+                    result["turnover_hkd_100m"] = round(est, 2)
+                    logger.info(f"[HSI] 成交额粗估（yf volume）: {result['turnover_hkd_100m']} 亿港元（误差较大）")
+        except Exception:
+            pass
 
     return result
 
@@ -169,27 +186,68 @@ def fetch_a_share_indices() -> dict:
         errors.append(f"深证: {e}")
         logger.warning(f"[SZ] {e}")
 
-    # A股总成交额：先用 stock_zh_a_spot_em，超时则用交易所日报接口
-    try:
-        df = ak.stock_zh_a_spot_em()
-        if df is not None and not df.empty:
-            for col in ["成交额", "amount", "总成交额"]:
-                if col in df.columns:
-                    total = df[col].sum()
-                    result["total_turnover_trillion"] = round(total / 1e12, 2)
-                    break
-    except Exception as e:
-        logger.debug(f"[A-turnover-v1] {e}（尝试备用接口）")
-        # 备用：用沪深两市指数的 stock_zh_index_daily 无法得到总成交额
-        # 改用 stock_market_activity_legu（乐股市场总览）
+    # A股总成交额
+    # 主：stock_market_activity_legu（单次请求，轻量）
+    # 备：stock_zh_a_spot_em（全量下载5000+股，慢但可靠）
+    def _parse_turnover_str(s: str) -> Optional[float]:
+        """解析'1.23万亿'/'12345亿'/'1.23e12'(元)等格式，统一返回万亿人民币"""
+        s = str(s).replace(",", "").strip()
         try:
-            df2 = ak.stock_market_activity_legu()
-            if df2 is not None and not df2.empty:
-                logger.debug(f"[A-turnover-v2] 列名: {list(df2.columns)}")
-                for col in df2.columns:
-                    if "成交" in str(col) and "额" in str(col):
-                        val = float(str(df2[col].iloc[0]).replace(",", "").replace("万亿", ""))
-                        result["total_turnover_trillion"] = round(val, 2)
+            if "万亿" in s:
+                return round(float(s.replace("万亿", "").strip()), 4)
+            elif "亿" in s:
+                return round(float(s.replace("亿", "").strip()) / 10000, 4)
+            else:
+                val = float(s)
+                if val > 1e11:      # 原始元值
+                    return round(val / 1e12, 4)
+                elif val > 1e7:     # 亿元值
+                    return round(val / 10000, 4)
+                else:               # 已经是万亿
+                    return round(val, 4)
+        except (ValueError, TypeError):
+            return None
+
+    try:
+        df2 = ak.stock_market_activity_legu()
+        if df2 is not None and not df2.empty:
+            logger.debug(f"[A-turnover-legu] 列名: {list(df2.columns)}, 数据:\n{df2.to_string()}")
+            # 遍历所有列和行，寻找包含"成交"+"额"的字段
+            found = False
+            for col in df2.columns:
+                if "成交" in str(col) and "额" in str(col):
+                    val = _parse_turnover_str(df2[col].iloc[0])
+                    if val is not None:
+                        result["total_turnover_trillion"] = val
+                        found = True
+                        break
+            # 若列名中没有，尝试从值列中匹配（宽表转长表格式）
+            if not found:
+                for _, row2 in df2.iterrows():
+                    for col in df2.columns:
+                        cell = str(row2.get(col, ""))
+                        if "成交额" in cell or "沪深成交" in cell:
+                            # 找同行或下一列的数值
+                            cols_list = list(df2.columns)
+                            idx = cols_list.index(col)
+                            if idx + 1 < len(cols_list):
+                                val = _parse_turnover_str(row2[cols_list[idx + 1]])
+                                if val is not None:
+                                    result["total_turnover_trillion"] = val
+                                    found = True
+                                    break
+                    if found:
+                        break
+    except Exception as e:
+        logger.warning(f"[A-turnover-legu] {e}，尝试备用接口")
+        try:
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                logger.debug(f"[A-turnover-spot] 列名: {list(df.columns)}")
+                for col in ["成交额", "amount", "总成交额"]:
+                    if col in df.columns:
+                        total = df[col].sum()
+                        result["total_turnover_trillion"] = round(total / 1e12, 4)
                         break
         except Exception as e2:
             errors.append(f"A股成交额: {e2}")
@@ -201,9 +259,11 @@ def fetch_a_share_indices() -> dict:
 
 
 def fetch_nikkei225() -> dict:
-    """日经225：收盘价、涨跌幅、成交量（亿股）"""
+    """日经225：收盘价、涨跌幅
+    注：yfinance ^N225 Volume 通常为0（指数无直接成交量），不展示成交量字段
+    """
     import yfinance as yf
-    result = {"close": None, "pct": None, "volume_100m": None, "error": None}
+    result = {"close": None, "pct": None, "error": None}
     try:
         tk = yf.Ticker("^N225")
         hist = tk.history(period="5d")
@@ -213,12 +273,7 @@ def fetch_nikkei225() -> dict:
         close = float(row["Close"])
         prev = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
         pct = (close - prev) / prev * 100
-        volume = float(row["Volume"])
-        result.update({
-            "close": round(close, 2),
-            "pct": round(pct, 2),
-            "volume_100m": round(volume / 1e8, 4)
-        })
+        result.update({"close": round(close, 2), "pct": round(pct, 2)})
     except Exception as e:
         result["error"] = str(e)
         logger.warning(f"[N225] {e}")
