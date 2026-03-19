@@ -58,7 +58,13 @@ def warn(label: str) -> str:
 # 早报正文生成
 # ─────────────────────────────────────────────
 
-def build_brief(market_data: dict, stock_sections: list[str], now_hkt: datetime) -> str:
+def build_brief(
+    market_data: dict,
+    stock_sections: list[str],
+    now_hkt: datetime,
+    macro_section: str = "",
+    ipo_section: str = "",
+) -> str:
     date_str = now_hkt.strftime("%Y-%m-%d")
     date_compact = now_hkt.strftime("%Y%m%d")
 
@@ -145,13 +151,23 @@ WTI原油：{fxv("WTI", 2)}"""
     else:
         stocks_block = "▶️四、*個股動態*\n" + warn("個股新聞")
 
+    # ── 第三部分：宏观 & 行业 ──────────────────────────────────────────────────
+    macro_block = macro_section or "▶️三、*宏觀及行業動態*\n• 暫無數據"
+
+    # ── 第五部分：今日招股 ────────────────────────────────────────────────────
+    ipo_block = ipo_section or "▶️五、*今日招股（新股認購）*\n• 今日暫無新股認購"
+
     # ── 拼接完整早报 ──────────────────────────────────────────────────────────
     brief = f"""Good Morning, {date_compact} Daily Brief
 ▶️一、*{date_str}核心資金動態*
 {hsi_block}{a_block}{nikkei_block}
 {fx_block}
 
-{stocks_block}"""
+{macro_block}
+
+{stocks_block}
+
+{ipo_block}"""
 
     return brief.strip()
 
@@ -248,6 +264,25 @@ def main():
         logger.error(f"市场数据模块失败: {e}")
         market_data = {}
 
+    # ── Step 2a: 抓取宏观新闻 ─────────────────────────────────────────────────
+    logger.info("Step 2a: 抓取宏观 & 行业新闻")
+    try:
+        from fetchers.macro_news import fetch_macro_news
+        macro_news_items = fetch_macro_news()
+    except Exception as e:
+        logger.error(f"宏观新闻抓取失败: {e}")
+        macro_news_items = []
+
+    # ── Step 2b: 抓取今日招股 ─────────────────────────────────────────────────
+    logger.info("Step 2b: 抓取今日招股")
+    try:
+        from fetchers.ipo_fetcher import fetch_hk_ipo_today, fmt_ipo_section
+        ipo_list = fetch_hk_ipo_today(today=now_hkt.date())
+        ipo_section = fmt_ipo_section(ipo_list)
+    except Exception as e:
+        logger.error(f"今日招股抓取失败: {e}")
+        ipo_section = "▶️五、*今日招股（新股認購）*\n• ⚠️ 數據獲取失敗，請手動補充"
+
     # ── Step 2: 抓取个股新闻 ──────────────────────────────────────────────────
     logger.info("Step 2: 抓取个股新闻")
     try:
@@ -258,9 +293,16 @@ def main():
         all_news = {}
 
     # ── Step 3: LLM 提炼 ──────────────────────────────────────────────────────
-    logger.info("Step 3: LLM 提炼个股动态")
+    logger.info("Step 3a: LLM 提炼宏观动态")
     try:
-        from llm.refiner import refine_all_stocks
+        from llm.refiner import refine_macro_news, refine_all_stocks
+        macro_section = refine_macro_news(macro_news_items)
+    except Exception as e:
+        logger.error(f"宏观LLM提炼失败: {e}")
+        macro_section = "▶️三、*宏觀及行業動態*\n• ⚠️ LLM提炼失败，请手动补充"
+
+    logger.info("Step 3b: LLM 提炼个股动态")
+    try:
         stock_sections = refine_all_stocks(all_news, llm_interval=1.0)
     except Exception as e:
         logger.error(f"LLM 提炼失败: {e}")
@@ -268,7 +310,11 @@ def main():
 
     # ── Step 4: 生成早报 ──────────────────────────────────────────────────────
     logger.info("Step 4: 生成早报文本")
-    brief_text = build_brief(market_data, stock_sections, now_hkt)
+    brief_text = build_brief(
+        market_data, stock_sections, now_hkt,
+        macro_section=macro_section,
+        ipo_section=ipo_section,
+    )
 
     # ── Step 5: 保存到文件 ────────────────────────────────────────────────────
     out_file = OUTPUT_DIR / f"{now_hkt.strftime('%Y%m%d')}.md"

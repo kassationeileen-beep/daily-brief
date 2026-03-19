@@ -445,3 +445,59 @@ def refine_all_stocks(all_news: dict, llm_interval: float = 1.0) -> list[str]:
         logger.info(f"已写入 {len(new_event_keywords)} 条事件记录到 seen_events.json")
 
     return outputs
+
+
+# ─────────────────────────────────────────────
+# 第三部分：宏观 & 行业新闻摘要
+# ─────────────────────────────────────────────
+
+_MACRO_SYSTEM_PROMPT = """你是一名服务香港证券从业者的资深财经编辑。
+你的任务是从提供的英文/中文新闻列表中，提取出对港股/A股投资者最重要的宏观经济和行业动态，
+输出一份简洁的中文要点摘要。
+
+输出要求：
+- 输出3-5条要点，每条以"• "开头
+- 每条不超过60个中文字
+- 优先关注：美联储/央行动向、中国经济数据、贸易/关税政策、能源/大宗商品、港股相关监管政策
+- 使用繁体中文
+- 如无重要事件，输出"• 暫無重要宏觀動態"
+- 不要添加标题行，直接输出要点列表"""
+
+
+def refine_macro_news(news_items: list[dict], max_items: int = 20) -> str:
+    """
+    将宏观新闻列表 → LLM → 3-5条中文要点摘要。
+    返回格式化的第三部分文本块，或降级纯文本摘要。
+    """
+    if not news_items:
+        return "▶️三、*宏觀及行業動態*\n• 暫無重要宏觀動態"
+
+    # 格式化新闻列表送给 LLM（取最新 max_items 条）
+    items_to_use = news_items[:max_items]
+    news_text = "\n".join(
+        f"[{i+1}][{item.get('source','')}] {item.get('title','')} | {item.get('content','')[:150]}"
+        for i, item in enumerate(items_to_use)
+    )
+
+    now = datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+
+    messages = [
+        {"role": "system", "content": _MACRO_SYSTEM_PROMPT},
+        {"role": "user", "content": (
+            f"今日日期：{date_str}\n\n"
+            f"以下是今日宏观财经新闻（共{len(items_to_use)}条）：\n\n"
+            f"{news_text}\n\n"
+            f"请输出3-5条要点摘要（繁体中文，每条以'• '开头）："
+        )},
+    ]
+
+    try:
+        output, provider = call_llm_with_fallback(messages, max_tokens=400)
+        logger.info(f"[MacroRefine] LLM({provider}) 生成宏观摘要 {len(output)} 字")
+        return f"▶️三、*宏觀及行業動態*\n{output}"
+    except Exception as e:
+        logger.error(f"[MacroRefine] LLM 失败: {e}，降级输出标题列表")
+        # 降级：直接输出前5条标题
+        fallback_lines = [f"• {item['title'][:60]}" for item in items_to_use[:5]]
+        return "▶️三、*宏觀及行業動態*\n" + "\n".join(fallback_lines)
