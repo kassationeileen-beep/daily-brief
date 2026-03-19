@@ -139,8 +139,9 @@ WTI原油：{fxv("WTI", 2)}"""
         fx_block = "▶️二、*關鍵匯率*\n" + warn("匯率")
 
     # ── 第四部分：个股动态 ────────────────────────────────────────────────────
+    # 每只股票用 \n\n 分隔，方便 Telegram 按段切割
     if stock_sections:
-        stocks_block = "▶️四、*個股動態*\n" + "\n".join(stock_sections)
+        stocks_block = "▶️四、*個股動態*\n" + "\n\n".join(stock_sections)
     else:
         stocks_block = "▶️四、*個股動態*\n" + warn("個股新聞")
 
@@ -159,9 +160,37 @@ WTI原油：{fxv("WTI", 2)}"""
 # Telegram 推送
 # ─────────────────────────────────────────────
 
+def _split_text(text: str, chunk_size: int) -> list[str]:
+    """
+    按行切割文本，保证每段不超过 chunk_size 字符。
+    优先在空行处断开，次选在换行处断开。
+    """
+    lines = text.splitlines(keepends=True)
+    chunks = []
+    current = ""
+    for line in lines:
+        # 单行本身超长：强制按字符截断
+        if len(line) > chunk_size:
+            if current:
+                chunks.append(current.rstrip())
+                current = ""
+            for i in range(0, len(line), chunk_size):
+                chunks.append(line[i:i + chunk_size].rstrip())
+            continue
+        if len(current) + len(line) > chunk_size:
+            chunks.append(current.rstrip())
+            current = line
+        else:
+            current += line
+    if current.strip():
+        chunks.append(current.rstrip())
+    return [c for c in chunks if c.strip()]
+
+
 def send_telegram(text: str, token: str, chat_id: str, chunk_size: int = 3800):
     """超 4000 字自动分段推送（保留 Markdown V1 格式）"""
     import httpx
+    import time as _time
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
 
@@ -173,25 +202,15 @@ def send_telegram(text: str, token: str, chat_id: str, chunk_size: int = 3800):
             "disable_web_page_preview": True,
         }
         resp = httpx.post(url, json=payload, timeout=30)
+        # 若 Markdown 解析失败，退回纯文本重试
+        if resp.status_code == 400 and "parse" in resp.text.lower():
+            payload["parse_mode"] = ""
+            resp = httpx.post(url, json=payload, timeout=30)
         resp.raise_for_status()
         return resp.json()
 
-    # 按段落分割，每段不超过 chunk_size
-    paragraphs = text.split("\n\n")
-    chunks = []
-    current = ""
-    for para in paragraphs:
-        if len(current) + len(para) + 2 > chunk_size:
-            if current:
-                chunks.append(current.strip())
-            current = para
-        else:
-            current = (current + "\n\n" + para).strip() if current else para
-
-    if current:
-        chunks.append(current.strip())
-
-    logger.info(f"Telegram 推送：共 {len(chunks)} 段")
+    chunks = _split_text(text, chunk_size)
+    logger.info(f"Telegram 推送：共 {len(chunks)} 段（总长 {len(text)} 字）")
     for i, chunk in enumerate(chunks, 1):
         try:
             send_chunk(chunk)

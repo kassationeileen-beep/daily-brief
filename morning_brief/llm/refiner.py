@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 SEEN_EVENTS_PATH = Path(__file__).parent.parent / "seen_events.json"
 HISTORY_DAYS = 3       # 注入去重用的历史天数
 CLEANUP_DAYS = 7       # 超过此天数的记录清除
+NEWS_FRESHNESS_DAYS = 2  # 只处理最近N天的新闻，过滤旧新闻
 
 SYSTEM_PROMPT = """你是专业金融早报编辑。将原始财经新闻提炼为机构投资者早报格式。
 
@@ -31,12 +32,14 @@ SYSTEM_PROMPT = """你是专业金融早报编辑。将原始财经新闻提炼�
 - 无具体数据的行业泛评论
 - 分析师预测（非公司官方发布）
 - 旧事件的二次解读和评论文章
+- 新闻日期超过2天前的内容（[日期]标签中日期距今日超过2天则丢弃）
 - 已在[历史播报]中出现的事件（核心事实相同即为重复，不看标题措辞）
 
 【处理规则】
-1. 去重：同一事件多渠道报道只保留信息最全版本
-2. 提炼：每条压缩为1-2句，保留关键数字，删除来源标签和修饰语
-3. 无实质新闻则静默跳过，不输出该公司
+1. 优先处理今日和昨日新闻，更早的新闻除非极重大否则丢弃
+2. 去重：同一事件多渠道报道只保留信息最全版本
+3. 提炼：每条压缩为1-2句，保留关键数字，删除来源标签和修饰语
+4. 无实质新闻则静默跳过，不输出该公司
 美股新闻为英文，需翻译为繁體中文后提炼。
 
 【输出格式，严格遵守】
@@ -87,6 +90,70 @@ def append_today_events(events: dict, new_items: list[str]) -> dict:
     existing = events.get(today, [])
     events[today] = list(set(existing + new_items))
     return events
+
+
+# ─────────────────────────────────────────────
+# 新闻日期解析与过滤
+# ─────────────────────────────────────────────
+
+def _parse_news_date(time_str: str) -> Optional[datetime]:
+    """尝试解析新闻时间字符串，返回 datetime 或 None"""
+    if not time_str:
+        return None
+    formats = [
+        "%a, %d %b %Y %H:%M:%S %z",   # RSS: Thu, 18 Mar 2026 14:30:00 +0000
+        "%a, %d %b %Y %H:%M:%S %Z",   # RSS with TZ name
+        "%Y-%m-%d %H:%M:%S",           # akshare 常见格式
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M",
+        "%Y%m%d%H%M%S",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(time_str.strip(), fmt)
+        except (ValueError, AttributeError):
+            continue
+    # feedparser 有时给 time_struct
+    try:
+        import time as _time
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(time_str)
+    except Exception:
+        pass
+    return None
+
+
+def filter_fresh_news(news_items: list[dict], days: int = NEWS_FRESHNESS_DAYS) -> list[dict]:
+    """
+    过滤掉超过 days 天前的新闻。
+    无法解析日期的保留（保守策略）。
+    """
+    cutoff = datetime.now().astimezone() - timedelta(days=days)
+    fresh = []
+    for item in news_items:
+        dt = _parse_news_date(item.get("time", ""))
+        if dt is None:
+            fresh.append(item)  # 无法判断，保留
+            continue
+        # 统一为无时区对比
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        cutoff_naive = cutoff.replace(tzinfo=None)
+        if dt >= cutoff_naive:
+            fresh.append(item)
+    return fresh
+
+
+def fmt_news_with_date(news_items: list[dict]) -> str:
+    """将新闻列表格式化为带日期标签的文本（方便 LLM 判断新鲜度）"""
+    lines = []
+    for i, item in enumerate(news_items[:15], 1):
+        date_tag = item.get("time", "")[:16] or "日期未知"
+        title = item.get("title", "")
+        content = item.get("content", "")
+        lines.append(f"[{i}][{date_tag}] {title} | {content}")
+    return "\n".join(lines)
 
 
 def extract_event_keywords(llm_output: str) -> list[str]:
@@ -181,6 +248,7 @@ def refine_stock_news(
     news_items: list[dict],
     history_context: str,
     is_us: bool = False,
+    today_str: str = "",
 ) -> Optional[str]:
     """
     返回格式化字符串如 "🔸腾讯：1）..."，或 None（无实质新闻）
@@ -188,19 +256,26 @@ def refine_stock_news(
     if not news_items:
         return None
 
-    # 构建新闻文本
-    news_text = "\n".join(
-        f"[{i+1}] 标题: {item.get('title', '')} | 内容: {item.get('content', '')}"
-        for i, item in enumerate(news_items[:15])
-    )
+    # 先过滤过旧新闻
+    fresh_items = filter_fresh_news(news_items, days=NEWS_FRESHNESS_DAYS)
+    if not fresh_items:
+        logger.debug(f"  [{company_name}] 无近 {NEWS_FRESHNESS_DAYS} 天新鲜新闻，跳过")
+        return None
+
+    today_str = today_str or datetime.now().strftime("%Y-%m-%d")
     lang_note = "（以下为英文新闻，请翻译为繁體中文后提炼）" if is_us else ""
 
-    user_prompt = f"""公司：{company_name}
+    # 构建带日期标签的新闻文本，帮助 LLM 判断新鲜度
+    news_text = fmt_news_with_date(fresh_items)
 
-[历史播报]
+    user_prompt = f"""今日日期：{today_str}
+公司：{company_name}
+
+[历史播报（近3天已播出事件，相同事实请勿重复输出）]
 {history_context}
 
-[最新新闻]{lang_note}
+[待处理新闻]{lang_note}
+（每条格式：[序号][发布日期] 标题 | 摘要，超过2天前的请直接跳过）
 {news_text}
 
 请按格式输出，无实质新闻输出 NO_NEWS。"""
@@ -233,6 +308,7 @@ def refine_all_stocks(all_news: dict, llm_interval: float = 1.0) -> list[str]:
     seen_events = load_seen_events()
     seen_events = cleanup_old_events(seen_events)
     history_context = get_history_context(seen_events)
+    today_str = datetime.now().strftime("%Y-%m-%d")
 
     outputs = []
     new_event_keywords = []
@@ -248,8 +324,9 @@ def refine_all_stocks(all_news: dict, llm_interval: float = 1.0) -> list[str]:
                 logger.debug(f"  [{name}] 无新闻，跳过")
                 continue
 
-            logger.info(f"  提炼 [{name}]（{len(news)} 条新闻）...")
-            result = refine_stock_news(name, news, history_context, is_us=is_us)
+            logger.info(f"  提炼 [{name}]（{len(news)} 条，过滤前）...")
+            result = refine_stock_news(name, news, history_context,
+                                       is_us=is_us, today_str=today_str)
             if result:
                 outputs.append(result)
                 new_event_keywords.extend(extract_event_keywords(result))
