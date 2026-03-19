@@ -17,7 +17,28 @@ HISTORY_DAYS = 3       # 注入去重用的历史天数
 CLEANUP_DAYS = 7       # 超过此天数的记录清除
 NEWS_FRESHNESS_DAYS = 2  # 只处理最近N天的新闻，过滤旧新闻
 
-SYSTEM_PROMPT = """你是专业金融早报编辑。将原始财经新闻提炼为机构投资者早报格式。
+
+def _build_system_prompt() -> str:
+    """动态生成 system prompt，注入当前日期和财务报告期规则"""
+    now = datetime.now()
+    year = now.year          # e.g. 2026
+    month = now.month        # e.g. 3
+    prev_year = year - 1     # 2025
+    prev2_year = year - 2    # 2024
+
+    # 计算哪些财务期间是"陈旧"的
+    # 中期/H1：上半年业绩在8月前后披露，超过6个月即陈旧
+    # 若现在是1-6月：上一年H1是陈旧的；若7-12月：本年H1才刚发布不久
+    if month <= 6:
+        stale_interim = f"{prev_year}年中期/H1/半年"   # 超过6个月
+        stale_annual_cutoff = prev2_year               # 2024年及更早年报是旧的
+    else:
+        # 下半年：本年H1刚发不久，仍有效；2年前年报是旧的
+        stale_interim = f"{prev2_year}年及更早的中期/H1/半年"
+        stale_annual_cutoff = prev2_year
+
+    return f"""你是专业金融早报编辑。将原始财经新闻提炼为机构投资者早报格式。
+今日日期：{now.strftime("%Y年%m月%d日")}
 
 【优先保留，必须输出】
 - 业绩发布：季报/年报核心数据、业绩预告、盈利警告
@@ -32,12 +53,26 @@ SYSTEM_PROMPT = """你是专业金融早报编辑。将原始财经新闻提炼�
 - 无具体数据的行业泛评论
 - 分析师预测（非公司官方发布）
 - 旧事件的二次解读和评论文章
-- 新闻日期超过2天前的内容（[日期]标签中日期距今日超过2天则丢弃）
+- [日期未知]或发布日期距今超过2天的文章（除非内容极重大）
 - 已在[历史播报]中出现的事件（核心事实相同即为重复，不看标题措辞）
 
+【财务报告期新鲜度规则（重要）】
+✅ 接受（当前有效）：
+  - {year}年任何期间的业绩
+  - {prev_year}年全年/年报（通常在{year}年Q1-Q2发布，属正常披露）
+  - {prev_year}年Q3/三季报（若文章发布日期在2天内）
+
+❌ 丢弃（陈旧事件）：
+  - {stale_interim}业绩（报告期过旧，即便文章是新发布的也丢弃）
+  - {stale_annual_cutoff}年及更早的全年/年报
+  - 任何季报/中报若报告期超过9个月
+
+示例：今日{now.strftime("%Y年%m月")}，"{prev_year}年中期业绩"属陈旧事件 → 丢弃；
+     "{prev_year}年全年业绩"在{year}年Q1披露属正常 → 接受
+
 【处理规则】
-1. 优先处理今日和昨日新闻，更早的新闻除非极重大否则丢弃
-2. 去重：同一事件多渠道报道只保留信息最全版本
+1. 优先处理今日和昨日新闻
+2. 去重：同一事件（如同一家公司同一报告期业绩）只保留信息最全版本，不重复输出不同报告期
 3. 提炼：每条压缩为1-2句，保留关键数字，删除来源标签和修饰语
 4. 无实质新闻则静默跳过，不输出该公司
 美股新闻为英文，需翻译为繁體中文后提炼。
@@ -100,25 +135,32 @@ def _parse_news_date(time_str: str) -> Optional[datetime]:
     """尝试解析新闻时间字符串，返回 datetime 或 None"""
     if not time_str:
         return None
+    s = time_str.strip()
     formats = [
         "%a, %d %b %Y %H:%M:%S %z",   # RSS: Thu, 18 Mar 2026 14:30:00 +0000
-        "%a, %d %b %Y %H:%M:%S %Z",   # RSS with TZ name
-        "%Y-%m-%d %H:%M:%S",           # akshare 常见格式
+        "%a, %d %b %Y %H:%M:%S %Z",   # RSS with TZ name (GMT)
+        "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
         "%Y-%m-%d",
         "%Y/%m/%d %H:%M",
         "%Y%m%d%H%M%S",
+        "%d %b %Y %H:%M:%S %z",
     ]
     for fmt in formats:
         try:
-            return datetime.strptime(time_str.strip(), fmt)
+            return datetime.strptime(s, fmt)
         except (ValueError, AttributeError):
             continue
-    # feedparser 有时给 time_struct
+    # email.utils 解析 RFC2822（feedparser标准格式）
     try:
-        import time as _time
         from email.utils import parsedate_to_datetime
-        return parsedate_to_datetime(time_str)
+        return parsedate_to_datetime(s)
+    except Exception:
+        pass
+    # 最后尝试 dateutil（如已安装）
+    try:
+        from dateutil import parser as du
+        return du.parse(s)
     except Exception:
         pass
     return None
@@ -127,21 +169,27 @@ def _parse_news_date(time_str: str) -> Optional[datetime]:
 def filter_fresh_news(news_items: list[dict], days: int = NEWS_FRESHNESS_DAYS) -> list[dict]:
     """
     过滤掉超过 days 天前的新闻。
-    无法解析日期的保留（保守策略）。
+    - 能解析日期：按日期过滤
+    - 无法解析日期：标记为"日期未知"并保留，交由 LLM 根据内容判断
     """
     cutoff = datetime.now().astimezone() - timedelta(days=days)
+    cutoff_naive = cutoff.replace(tzinfo=None)
     fresh = []
     for item in news_items:
-        dt = _parse_news_date(item.get("time", ""))
+        raw_time = item.get("time", "")
+        dt = _parse_news_date(raw_time)
         if dt is None:
-            fresh.append(item)  # 无法判断，保留
-            continue
-        # 统一为无时区对比
-        if dt.tzinfo is not None:
-            dt = dt.replace(tzinfo=None)
-        cutoff_naive = cutoff.replace(tzinfo=None)
-        if dt >= cutoff_naive:
+            # 无法解析日期：标记后保留，让 LLM 凭内容判断
+            item = dict(item)
+            item["time"] = f"日期未知（原始：{raw_time[:30]}）" if raw_time else "日期未知"
             fresh.append(item)
+            logger.debug(f"  [日期解析失败] {raw_time!r} → 保留，交LLM判断")
+            continue
+        dt_naive = dt.replace(tzinfo=None) if dt.tzinfo else dt
+        if dt_naive >= cutoff_naive:
+            fresh.append(item)
+        else:
+            logger.debug(f"  [过滤旧新闻] {dt_naive.date()} | {item.get('title','')[:40]}")
     return fresh
 
 
@@ -149,7 +197,9 @@ def fmt_news_with_date(news_items: list[dict]) -> str:
     """将新闻列表格式化为带日期标签的文本（方便 LLM 判断新鲜度）"""
     lines = []
     for i, item in enumerate(news_items[:15], 1):
-        date_tag = item.get("time", "")[:16] or "日期未知"
+        raw_time = item.get("time", "")
+        # 只取前16字符，避免时区信息太长
+        date_tag = raw_time[:16] if raw_time else "日期未知"
         title = item.get("title", "")
         content = item.get("content", "")
         lines.append(f"[{i}][{date_tag}] {title} | {content}")
@@ -281,7 +331,7 @@ def refine_stock_news(
 请按格式输出，无实质新闻输出 NO_NEWS。"""
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": _build_system_prompt()},
         {"role": "user", "content": user_prompt},
     ]
 
