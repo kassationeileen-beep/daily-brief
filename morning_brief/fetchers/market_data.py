@@ -117,12 +117,50 @@ def fetch_hsi() -> dict:
 
 
 def fetch_southbound_flow() -> dict:
-    """南向资金（港股通）净流入，单位亿港元
-    数据源均来自东方财富，境外服务器（新加坡等）无法访问，直接返回不可用标记。
-    如需此数据，需在中国大陆/香港境内的服务器运行，或使用付费数据 API。
-    """
-    result = {"net_flow_hkd_100m": None, "direction": None, "error": "境外IP不可用（數據源僅限境內）"}
-    logger.info("[Southbound] 南向资金数据源（东方财富）境外不可用，跳过")
+    """南向资金（港股通）净流入，单位亿港元"""
+    import akshare as ak
+    result = {"net_flow_hkd_100m": None, "direction": None, "error": None}
+
+    # 方法一：stock_hsgt_fund_flow_summary_em
+    try:
+        df = ak.stock_hsgt_fund_flow_summary_em()
+        if df is not None and not df.empty:
+            logger.debug(f"[Southbound-v1] 列名: {list(df.columns)}, 行数: {len(df)}")
+            south_row = None
+            for col in df.columns:
+                mask = df[col].astype(str).str.contains("南", na=False)
+                if mask.any():
+                    south_row = df[mask].iloc[0]
+                    break
+            if south_row is None:
+                south_row = df.iloc[-1]
+            for col in ["今日净流入（亿元）", "净流入（亿）", "当日净买入（亿元）",
+                        "净买入（亿元）", "当日净流入", "净流入"]:
+                if col in df.columns:
+                    val = float(south_row[col])
+                    result["net_flow_hkd_100m"] = abs(round(val, 2))
+                    result["direction"] = "買入" if val >= 0 else "賣出"
+                    return result
+            logger.warning(f"[Southbound] 未找到净流入列，实际列名: {list(df.columns)}")
+    except Exception as e:
+        logger.debug(f"[Southbound-v1] {e}")
+
+    # 方法二：stock_hsgt_hist_em
+    try:
+        df = ak.stock_hsgt_hist_em(symbol="南向资金")
+        if df is not None and not df.empty:
+            logger.debug(f"[Southbound-v2] 列名: {list(df.columns)}")
+            row = df.iloc[-1]
+            for col in df.columns:
+                if "净" in str(col):
+                    val = float(row[col])
+                    result["net_flow_hkd_100m"] = abs(round(val, 2))
+                    result["direction"] = "買入" if val >= 0 else "賣出"
+                    return result
+    except Exception as e:
+        logger.debug(f"[Southbound-v2] {e}")
+
+    result["error"] = "南向资金数据获取失败"
     return result
 
 
@@ -236,11 +274,11 @@ def fetch_a_share_indices() -> dict:
 
 
 def fetch_nikkei225() -> dict:
-    """日经225：收盘价、涨跌幅
-    注：yfinance ^N225 Volume 通常为0（指数无直接成交量），不展示成交量字段
+    """日经225：收盘价、涨跌幅、成交量（亿股）
+    注：yfinance ^N225 Volume 通常为0，此时 volume_100m 保留为 None（供手动补充）
     """
     import yfinance as yf
-    result = {"close": None, "pct": None, "error": None}
+    result = {"close": None, "pct": None, "volume_100m": None, "error": None}
     try:
         tk = yf.Ticker("^N225")
         hist = tk.history(period="5d")
@@ -250,7 +288,12 @@ def fetch_nikkei225() -> dict:
         close = float(row["Close"])
         prev = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
         pct = (close - prev) / prev * 100
-        result.update({"close": round(close, 2), "pct": round(pct, 2)})
+        volume = float(row.get("Volume", 0) or 0)
+        result.update({
+            "close": round(close, 2),
+            "pct": round(pct, 2),
+            "volume_100m": round(volume / 1e8, 4) if volume > 0 else None,
+        })
     except Exception as e:
         result["error"] = str(e)
         logger.warning(f"[N225] {e}")

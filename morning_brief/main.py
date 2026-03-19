@@ -96,13 +96,13 @@ def build_brief(
     if hsi.get("error") and not hsi.get("close"):
         hsi_block = warn("恒生指數") + "\n"
 
-    # 南向资金（东方财富接口，境外服务器不可用时显示 N/A，不报警告）
+    # 南向资金
     if sb.get("net_flow_hkd_100m") is not None:
         sb_dir = sb.get("direction", "")
         sb_val = fmt_num(sb["net_flow_hkd_100m"])
         sb_line = f"- 南向資金（北水）淨{sb_dir}：{sb_val} 億港元"
     else:
-        sb_line = "- 南向資金（北水）：N/A（境外服務器不可用）"
+        sb_line = "- 南向資金（北水）：N/A"
     hsi_block += sb_line + "\n"
 
     # A股
@@ -124,9 +124,11 @@ def build_brief(
     # 日经
     n_close = fmt_num(n225.get("close"))
     n_pct = fmt_pct(n225.get("pct"))
+    n_vol = fmt_num(n225.get("volume_100m"), decimals=4) if n225.get("volume_100m") else "N/A"
     nikkei_block = (
         f"3. 日經225（日股）\n"
         f"- 收盤價：{n_close} 點（{n_pct}）\n"
+        f"- 成交量：{n_vol} 億股\n"
     )
     if n225.get("error") and not n225.get("close"):
         nikkei_block = warn("日經225") + "\n"
