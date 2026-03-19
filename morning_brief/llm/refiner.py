@@ -193,6 +193,60 @@ def filter_fresh_news(news_items: list[dict], days: int = NEWS_FRESHNESS_DAYS) -
     return fresh
 
 
+def filter_stale_financial_content(news_items: list[dict]) -> list[dict]:
+    """
+    Python层内容关键词过滤：拦截标题中明确属于陈旧报告期的财报新闻。
+    逻辑与 _build_system_prompt 保持一致，作为双重保障。
+    """
+    import re
+    now = datetime.now()
+    year = now.year      # 2026
+    month = now.month    # 3
+
+    stale_patterns = []
+
+    # ── 陈旧的年度业绩 ──────────────────────────────────────────────────────
+    # 规则：年报只接受 prev_year（2025）；prev2_year（2024）及更早是旧的
+    for stale_year in range(2020, year - 1):  # 2020~2024
+        stale_patterns.append(
+            re.compile(rf"{stale_year}.{{0,4}}(全年|年度|年报|年結|年绩|annual)", re.IGNORECASE)
+        )
+
+    # ── 陈旧的中期/半年/季报 ────────────────────────────────────────────────
+    if month <= 6:
+        # 现在是上半年：上一年H1/中期是旧的（2025H1在2025年8月披露，距今>6月）
+        prev_year = year - 1  # 2025
+        for pattern_str in [
+            rf"{prev_year}.{{0,4}}(中期|半年|[Hh]1|上半年|interim)",
+            rf"{prev_year}.{{0,2}}H1",
+        ]:
+            stale_patterns.append(re.compile(pattern_str, re.IGNORECASE))
+        # prev2_year 及更早的任何中期都是旧的
+        for stale_year in range(2020, year - 1):
+            stale_patterns.append(
+                re.compile(rf"{stale_year}.{{0,4}}(中期|半年|[Hh]1|上半年|interim)", re.IGNORECASE)
+            )
+    else:
+        # 现在是下半年：2年前及更早的中期是旧的
+        for stale_year in range(2020, year - 1):
+            stale_patterns.append(
+                re.compile(rf"{stale_year}.{{0,4}}(中期|半年|[Hh]1|上半年|interim)", re.IGNORECASE)
+            )
+
+    fresh = []
+    for item in news_items:
+        title = item.get("title", "") + " " + item.get("content", "")
+        matched = False
+        for pat in stale_patterns:
+            if pat.search(title):
+                logger.debug(f"  [内容过滤-陈旧财报] 匹配「{pat.pattern}」→ {item.get('title','')[:50]}")
+                matched = True
+                break
+        if not matched:
+            fresh.append(item)
+    return fresh
+
+
 def fmt_news_with_date(news_items: list[dict]) -> str:
     """将新闻列表格式化为带日期标签的文本（方便 LLM 判断新鲜度）"""
     lines = []
@@ -306,8 +360,10 @@ def refine_stock_news(
     if not news_items:
         return None
 
-    # 先过滤过旧新闻
+    # 第一层：按发布日期过滤
     fresh_items = filter_fresh_news(news_items, days=NEWS_FRESHNESS_DAYS)
+    # 第二层：按内容关键词过滤陈旧财报期
+    fresh_items = filter_stale_financial_content(fresh_items)
     if not fresh_items:
         logger.debug(f"  [{company_name}] 无近 {NEWS_FRESHNESS_DAYS} 天新鲜新闻，跳过")
         return None
