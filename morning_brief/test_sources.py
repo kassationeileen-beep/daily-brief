@@ -87,13 +87,26 @@ for var in env_vars:
 section("3. AKShare 数据源")
 import akshare as ak
 
-def test_hsi():
+def test_hsi_yfinance():
+    """主：yfinance ^HSI（海外服务器稳定）"""
+    import yfinance as yf
+    tk = yf.Ticker("^HSI")
+    hist = tk.history(period="5d")
+    assert hist is not None and not hist.empty, "yfinance ^HSI 空数据"
+    close = float(hist["Close"].iloc[-1])
+    return f"yfinance ^HSI 收盘: {close:.2f}"
+
+test("恒生指数 (yfinance ^HSI)", test_hsi_yfinance)
+time.sleep(0.5)
+
+def test_hsi_akshare():
+    """备：akshare（海外IP访问东方财富可能超时，失败不影响主流程）"""
     df = ak.stock_hk_index_daily_em(symbol="恒生指数")
     assert df is not None and not df.empty, "空数据"
     row = df.iloc[-1]
-    return f"{len(df)} 行，最新: {row.iloc[1]:.2f}"
+    return f"akshare HSI 最新: {row.iloc[1]:.2f}"
 
-test("恒生指数 (stock_hk_index_daily_em)", test_hsi)
+test("恒生指数 [备] (akshare stock_hk_index_daily_em，海外可能超时)", test_hsi_akshare)
 time.sleep(1)
 
 def test_sh():
@@ -126,7 +139,8 @@ test("A股成交额 (stock_zh_a_spot_em)", test_a_spot)
 time.sleep(1)
 
 def test_southbound():
-    df = ak.stock_hsgt_fund_flow_summary_em(indicator="南向资金")
+    # 无参数调用（akshare 该函数不接受 indicator 参数）
+    df = ak.stock_hsgt_fund_flow_summary_em()
     assert df is not None and not df.empty
     return f"{len(df)} 行，列: {list(df.columns)}"
 
@@ -176,33 +190,39 @@ for ticker, label in [
 # ─────────────────────────────────────────────
 # 5. 东方财富港股新闻 API
 # ─────────────────────────────────────────────
-section("5. 东方财富港股新闻 API")
+section("5. 港股新闻（Yahoo Finance RSS 主，东方财富备）")
 import requests
 
-def test_hk_news(code="0700", name="腾讯"):
+def test_hk_news_yahoo(code="0700", name="腾讯"):
+    import feedparser
+    ticker = f"{code.zfill(4)}.HK"
+    url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=HK&lang=zh-Hant-HK"
+    feed = feedparser.parse(url)
+    assert len(feed.entries) > 0, f"Yahoo RSS {ticker} 无条目"
+    return f"{name}({ticker}): {len(feed.entries)} 条, 最新: {feed.entries[0].get('title','')[:40]}"
+
+test("港股新闻-腾讯 (Yahoo Finance RSS 0700.HK)", test_hk_news_yahoo)
+time.sleep(0.5)
+
+def test_hk_news_em(code="0700", name="腾讯"):
+    """东方财富备用接口测试（海外IP可能超时，不影响主流程）"""
     url = "https://np-listapi.eastmoney.com/comm/web/getListInfo"
     params = {
         "client": "web", "type": "1",
         "mTypeAndCode": f"116.{code}",
         "pageSize": "5", "pageIndex": "1", "callback": "",
     }
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://quote.eastmoney.com/",
-    }
-    resp = requests.get(url, params=params, headers=headers, timeout=15)
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
+    resp = requests.get(url, params=params, headers=headers, timeout=10)
     resp.raise_for_status()
     data = resp.json()
-    items = data.get("data", {}).get("list", []) or []
+    if not data:
+        return f"{name}: 响应为空（海外IP被拒，正常现象）"
+    inner = data.get("data") or {}
+    items = inner.get("list") or []
     return f"{name}({code}): {len(items)} 条新闻"
 
-test("港股新闻-腾讯 (东方财富 np-listapi)", test_hk_news)
-time.sleep(1)
-
-def test_hk_news_9988():
-    return test_hk_news("9988", "阿里巴巴")
-
-test("港股新闻-阿里巴巴 (东方财富)", test_hk_news_9988)
+test("港股新闻-腾讯 [备] (东方财富 np-listapi，海外可能超时)", test_hk_news_em)
 
 
 # ─────────────────────────────────────────────

@@ -83,34 +83,65 @@ US_STOCKS = {
 # 港股新闻（东方财富）
 # ─────────────────────────────────────────────
 
+def fetch_hk_news_yahoo(code: str, name: str, max_items: int = 10) -> list[dict]:
+    """
+    主：Yahoo Finance RSS for HK stocks（海外服务器稳定）
+    港股代码格式：0700.HK, 9988.HK（前导零保留）
+    """
+    import feedparser
+    # 四位数代码（含前导零）
+    ticker = f"{code.zfill(4)}.HK"
+    url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=HK&lang=zh-Hant-HK"
+    try:
+        feed = feedparser.parse(url)
+        news = []
+        for entry in feed.entries[:max_items]:
+            news.append({
+                "title": entry.get("title", ""),
+                "content": entry.get("summary", ""),
+                "time": entry.get("published", ""),
+                "lang": "zh",
+            })
+        return news
+    except Exception as e:
+        logger.debug(f"[HK-Yahoo/{code}] {e}")
+        return []
+
+
 def fetch_hk_news(code: str, name: str, max_items: int = 10) -> list[dict]:
     """
-    东方财富港股个股新闻 API
-    返回: [{"title": str, "content": str, "time": str}]
+    港股新闻：Yahoo Finance RSS 主，东方财富 API 备
     """
+    # 主：Yahoo Finance（海外稳定）
+    news = fetch_hk_news_yahoo(code, name, max_items)
+    if news:
+        return news
+
+    # 备：东方财富（可能因海外IP超时）
     import requests
-    # 东方财富港股个股新闻接口（非官方，逆向）
     url = "https://np-listapi.eastmoney.com/comm/web/getListInfo"
-    # 港股代码需加前缀 116.（HK市场）
     params = {
-        "client": "web",
-        "type": "1",
+        "client": "web", "type": "1",
         "mTypeAndCode": f"116.{code}",
-        "pageSize": max_items,
-        "pageIndex": "1",
-        "callback": "",
+        "pageSize": max_items, "pageIndex": "1", "callback": "",
     }
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
         "Referer": "https://quote.eastmoney.com/",
     }
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        items = data.get("data", {}).get("list", []) or []
+        # 防御性取值：data 或 data["data"] 可能为 None
+        if not data:
+            return []
+        inner = data.get("data") or {}
+        items = inner.get("list") or []
         news = []
         for item in items:
+            if not isinstance(item, dict):
+                continue
             news.append({
                 "title": item.get("title", ""),
                 "content": item.get("digest", item.get("summary", "")),
@@ -118,7 +149,7 @@ def fetch_hk_news(code: str, name: str, max_items: int = 10) -> list[dict]:
             })
         return news
     except Exception as e:
-        logger.warning(f"[HK新闻/{code}/{name}] {e}")
+        logger.debug(f"[HK东方财富/{code}/{name}] {e}")
         return []
 
 
