@@ -3,10 +3,23 @@ market_data.py — 第一、二部分：指数 + 汇率数据抓取
 """
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+_AKSHARE_TIMEOUT = 20  # seconds per akshare call
+
+
+def _timed(fn, label: str, timeout: int = _AKSHARE_TIMEOUT):
+    """在独立线程中运行 fn()，超时则抛出 TimeoutError"""
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(fn)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeoutError:
+            raise TimeoutError(f"{label} 请求超时 ({timeout}s)")
 
 
 def _safe(fn, label: str):
@@ -51,7 +64,7 @@ def fetch_hsi() -> dict:
     # 注：海外IP访问东方财富可能超时，失败时自动降级到备用方案
     try:
         import akshare as ak
-        df = ak.stock_hk_index_daily_em(symbol="恒生指数")
+        df = _timed(lambda: ak.stock_hk_index_daily_em(symbol="恒生指数"), "HSI-akshare")
         if df is not None and not df.empty:
             row = df.iloc[-1]
             logger.debug(f"[HSI-akshare] 列名: {list(df.columns)}")
@@ -125,7 +138,7 @@ def fetch_southbound_flow() -> dict:
     # 列：日期, 时间, 港股通(沪), 港股通(深), 南向资金（累计净流入，亿元）
     # 2024-08-19 交易所更改披露机制后，此端点仍可正常访问
     try:
-        df = ak.stock_hsgt_fund_min_em(symbol="南向资金")
+        df = _timed(lambda: ak.stock_hsgt_fund_min_em(symbol="南向资金"), "Southbound-min")
         if df is not None and not df.empty:
             row = df.iloc[-1]  # 取最新分钟（当日最新累计值）
             val = float(row["南向资金"])
@@ -140,7 +153,7 @@ def fetch_southbound_flow() -> dict:
     # 方法二：stock_hsgt_fund_flow_summary_em（无参数），过滤南向资金行
     # 注：该函数无 indicator 参数，返回沪深港通所有方向数据，需按板块过滤
     try:
-        df = ak.stock_hsgt_fund_flow_summary_em()
+        df = _timed(lambda: ak.stock_hsgt_fund_flow_summary_em(), "Southbound-v1")
         if df is not None and not df.empty:
             logger.debug(f"[Southbound-v1] 板块值: {df['板块'].unique().tolist()}")
             # 过滤南向：港股通沪 + 港股通深（板块列包含"港股通"或"南向"）
@@ -156,7 +169,7 @@ def fetch_southbound_flow() -> dict:
 
     # 方法三：stock_hsgt_hist_em 历史数据最新一行
     try:
-        df = ak.stock_hsgt_hist_em(symbol="南向资金")
+        df = _timed(lambda: ak.stock_hsgt_hist_em(symbol="南向资金"), "Southbound-v2")
         if df is not None and not df.empty:
             row = df.iloc[-1]  # 已按日期升序排列
             val = float(row["当日成交净买额"])  # 单位亿元
@@ -184,7 +197,7 @@ def fetch_a_share_indices() -> dict:
 
     # 上证综指
     try:
-        df = ak.stock_zh_index_daily(symbol="sh000001")
+        df = _timed(lambda: ak.stock_zh_index_daily(symbol="sh000001"), "SH")
         if df is not None and not df.empty:
             row = df.iloc[-1]
             close = float(row["close"])
@@ -197,7 +210,7 @@ def fetch_a_share_indices() -> dict:
 
     # 深证成指
     try:
-        df = ak.stock_zh_index_daily(symbol="sz399001")
+        df = _timed(lambda: ak.stock_zh_index_daily(symbol="sz399001"), "SZ")
         if df is not None and not df.empty:
             row = df.iloc[-1]
             close = float(row["close"])
@@ -231,7 +244,7 @@ def fetch_a_share_indices() -> dict:
             return None
 
     try:
-        df2 = ak.stock_market_activity_legu()
+        df2 = _timed(lambda: ak.stock_market_activity_legu(), "A-turnover-legu")
         if df2 is not None and not df2.empty:
             logger.debug(f"[A-turnover-legu] 列名: {list(df2.columns)}, 数据:\n{df2.to_string()}")
             # 遍历所有列和行，寻找包含"成交"+"额"的字段
@@ -263,7 +276,7 @@ def fetch_a_share_indices() -> dict:
     except Exception as e:
         logger.warning(f"[A-turnover-legu] {e}，尝试备用接口")
         try:
-            df = ak.stock_zh_a_spot_em()
+            df = _timed(lambda: ak.stock_zh_a_spot_em(), "A-turnover-spot")
             if df is not None and not df.empty:
                 logger.debug(f"[A-turnover-spot] 列名: {list(df.columns)}")
                 for col in ["成交额", "amount", "总成交额"]:
