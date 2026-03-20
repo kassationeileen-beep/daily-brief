@@ -4,8 +4,6 @@
 # 市场数据
 akshare>=1.12.0
 yfinance>=0.2.36
-# akshare 依赖 jsonpath（该包 wheel 构建有问题），用 jsonpath-ng 作为替代
-# 需同时执行 setup_jsonpath_shim.py 安装兼容层
 jsonpath-ng>=1.6.0
 
 # 新闻抓取
