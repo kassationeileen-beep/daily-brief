@@ -1,20 +1,21 @@
 """
 doubao_macro.py — 豆包（火山方舟）API 调用模块
-用于抓取需要实时搜索的内容：中国宏观、全球宏观、港股今日招股。
+用于抓取需要实时搜索的内容：中国宏观、全球宏观、港股今日招股、港股回购。
 
 设计原则：
 - 每个函数独立调用，固定 system prompt + user prompt，不依赖对话历史
 - 避免对话界面的"模板漂移"问题
 - 需要使用带联网搜索功能的 Bot（bot-xxx-xxx 格式的 model ID）
-- 三个函数互为独立，任一失败不影响其他
+- 各函数互为独立，任一失败不影响其他
 
 环境变量：
   ARK_API_KEY        火山方舟 API Key（必须）
-  DOUBAO_BOT_MACRO   宏观+招股用的 Bot ID，e.g. bot-20250101120000-xxxxx
-                     若宏观和招股使用不同 bot，可拆分为：
+  DOUBAO_BOT_MACRO   宏观+招股+回购通用 Bot ID，e.g. bot-20250101120000-xxxxx
+                     若各功能使用不同 bot，可拆分为：
   DOUBAO_BOT_MACRO_CN     中国宏观 Bot ID（可选，优先于 DOUBAO_BOT_MACRO）
   DOUBAO_BOT_MACRO_GLOBAL 全球宏观 Bot ID（可选，优先于 DOUBAO_BOT_MACRO）
   DOUBAO_BOT_IPO          招股 Bot ID（可选，优先于 DOUBAO_BOT_MACRO）
+  DOUBAO_BOT_BUYBACK      回购 Bot ID（可选，优先于 DOUBAO_BOT_MACRO）
 """
 import os
 import logging
@@ -313,3 +314,200 @@ def build_doubao_macro_section(
 def fmt_doubao_ipo_section(doubao_ipo_text: str) -> str:
     """将豆包 IPO 文本包装为第五部分标题块"""
     return f"▶️五、*今日招股（新股認購）*\n{doubao_ipo_text}"
+
+
+# ─────────────────────────────────────────────
+# 回购查询 Prompt
+# ─────────────────────────────────────────────
+
+_SYSTEM_BUYBACK = """你是港股回購數據整理助手。
+任務：搜索港交所過去{hours}小時內披露的所有股票回購（Stock Repurchase）記錄。
+數據來源：港交所官網（hkex.com.hk）回購統計頁面。
+
+【輸出格式，嚴格遵守】
+每只有回購記錄的股票佔一行，字段用"|"分隔：
+股票代碼（4位含前導零）|公司名（中文）|回購股數（X.XX萬股）|價格範圍（X.XX–X.XX港元）|回購金額（XXXX.XX萬港元）
+
+示例：
+0669|創科實業|30.00萬股|106.70–107.90港元|3219.81萬港元
+0700|騰訊|250.00萬股|430.00–435.00港元|108500.00萬港元
+
+【約束】
+- 只輸出數據行，不輸出任何標題、說明、前言後語
+- 股票代碼必須是4位（如 0700，不是 700）
+- 若過去{hours}小時內無任何回購記錄，輸出：NO_BUYBACK"""
+
+_USER_BUYBACK = "今天是{date}，請搜索港交所過去{hours}小時內（即{date}及前一日）披露的所有港股回購記錄，按格式輸出。"
+
+# 百胜中国专用 prompt（48h + 同时搜索 HK 和 US 代码）
+_SYSTEM_BUYBACK_YUMCHINA = """你是港股回購數據整理助手。
+任務：搜索百勝中國（港股代碼：09987.HK，美股代碼：YUMC）過去48小時內的股票回購披露記錄。
+百勝中國因美股上市慣例，回購通常在T+2日披露，請重點搜索港交所及SEC/美股相關公告。
+
+【輸出格式，嚴格遵守】
+9987|百勝中國|回購股數（X.XX萬股）|價格範圍（X.XX–X.XX港元 或 XX.XX–XX.XX美元）|回購金額（XXXX.XX萬港元 或 XXX.XX萬美元）
+
+【約束】
+- 只輸出數據行，不輸出任何標題、說明、前言後語
+- 若過去48小時內無百勝中國回購記錄，輸出：NO_BUYBACK"""
+
+_USER_BUYBACK_YUMCHINA = "今天是{date}，請搜索百勝中國（09987.HK / YUMC）過去48小時內的回購披露記錄，按格式輸出。"
+
+
+# ─────────────────────────────────────────────
+# 回购查询函数
+# ─────────────────────────────────────────────
+
+def fetch_doubao_buybacks(date_hkt: datetime = None) -> Optional[str]:
+    """
+    用豆包 API 搜索过去 24h 港交所所有股票回购记录。
+    返回原始管道分隔文本（供 parse_buyback_lines 解析），或 None（失败/无权限）。
+    """
+    bot_id = _get_bot_id("DOUBAO_BOT_BUYBACK")
+    if not bot_id:
+        logger.debug("[DoubaobuybackS] 未配置 Bot ID，跳过")
+        return None
+
+    if date_hkt is None:
+        HKT = timezone(timedelta(hours=8))
+        date_hkt = datetime.now(HKT)
+
+    date_str = date_hkt.strftime("%Y年%m月%d日")
+    hours = 24
+    system_prompt = _SYSTEM_BUYBACK.replace("{hours}", str(hours))
+    user_prompt = _USER_BUYBACK.format(date=date_str, hours=hours)
+
+    try:
+        output = _call_doubao(system_prompt, user_prompt, bot_id, max_tokens=600)
+        logger.info(f"[DoubaoByback] 成功，{len(output)} 字")
+        return output
+    except Exception as e:
+        logger.warning(f"[DoubaoByback] 调用失败: {e}")
+        return None
+
+
+def fetch_doubao_buyback_yumchina(date_hkt: datetime = None) -> Optional[str]:
+    """
+    百胜中国专用：48h 窗口，兼顾 HK/US 双重披露。
+    返回原始管道分隔文本，或 None。
+    """
+    bot_id = _get_bot_id("DOUBAO_BOT_BUYBACK")
+    if not bot_id:
+        return None
+
+    if date_hkt is None:
+        HKT = timezone(timedelta(hours=8))
+        date_hkt = datetime.now(HKT)
+
+    date_str = date_hkt.strftime("%Y年%m月%d日")
+    user_prompt = _USER_BUYBACK_YUMCHINA.format(date=date_str)
+
+    try:
+        output = _call_doubao(_SYSTEM_BUYBACK_YUMCHINA, user_prompt, bot_id, max_tokens=200)
+        logger.info(f"[DoubaoByback-YumChina] 成功，{len(output)} 字")
+        return output
+    except Exception as e:
+        logger.warning(f"[DoubaoByback-YumChina] 调用失败: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────
+# 回购数据解析 & Watchlist 匹配
+# ─────────────────────────────────────────────
+
+def parse_buyback_lines(raw_text: str) -> list[dict]:
+    """
+    解析豆包输出的管道分隔回购记录。
+    每行格式：0669|创科实业|30.00万股|106.70–107.90港元|3219.81万港元
+    返回: [{"code": "0669", "name": "创科实业", "shares": "30.00万股",
+             "price": "106.70–107.90港元", "amount": "3219.81万港元"}, ...]
+    """
+    if not raw_text or raw_text.strip() == "NO_BUYBACK":
+        return []
+
+    results = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line or line == "NO_BUYBACK":
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 3:
+            continue
+        results.append({
+            "code":   parts[0].lstrip("0").zfill(4),  # 标准化为4位
+            "name":   parts[1] if len(parts) > 1 else "",
+            "shares": parts[2] if len(parts) > 2 else "",
+            "price":  parts[3] if len(parts) > 3 else "",
+            "amount": parts[4] if len(parts) > 4 else "",
+        })
+    return results
+
+
+def match_watchlist_buybacks(
+    buyback_items: list[dict],
+    hk_watchlist: dict,
+) -> list[dict]:
+    """
+    将豆包返回的回购记录与 HK watchlist（{code: name}）做匹配，
+    只保留 watchlist 中的股票。匹配优先用股票代码（4位），
+    其次用 watchlist 名称与豆包返回名称的模糊比较。
+
+    返回匹配到的记录列表（含 watchlist_name 字段，使用 watchlist 中的规范名称）。
+    """
+    matched = []
+    seen_codes = set()
+
+    # 构建辅助映射：{标准化4位code: watchlist_name}
+    watchlist_normalized = {
+        code.lstrip("0").zfill(4): name
+        for code, name in hk_watchlist.items()
+    }
+
+    for item in buyback_items:
+        code = item.get("code", "").lstrip("0").zfill(4)
+        if not code:
+            continue
+
+        if code in watchlist_normalized and code not in seen_codes:
+            matched.append({
+                **item,
+                "code": code,
+                "watchlist_name": watchlist_normalized[code],
+            })
+            seen_codes.add(code)
+
+    return matched
+
+
+def fmt_buyback_subsection(matched_items: list[dict]) -> str:
+    """
+    格式化回购子段落。
+    示例输出：
+      **回購**
+      創科實業（00669.HK）
+      * 回購：30.00 萬股
+      * 價格：106.70–107.90 港元
+      * 金額：3219.81 萬港元
+    """
+    if not matched_items:
+        return ""
+
+    lines = ["**回購**"]
+    for item in matched_items:
+        code_display = item["code"].zfill(5)          # 港股5位显示惯例（如 00669）
+        name = item.get("watchlist_name") or item.get("name", "")
+        lines.append(f"{name}（{code_display}.HK）")
+
+        shares = item.get("shares", "")
+        price  = item.get("price", "")
+        amount = item.get("amount", "")
+
+        if shares:
+            lines.append(f"* 回購：{shares}")
+        if price:
+            lines.append(f"* 價格：{price}")
+        if amount:
+            lines.append(f"* 金額：{amount}")
+        lines.append("")  # 空行分隔不同股票
+
+    return "\n".join(lines).rstrip()

@@ -72,6 +72,7 @@ def build_brief(
     now_hkt: datetime,
     macro_section: str = "",
     ipo_section: str = "",
+    buyback_subsection: str = "",
 ) -> str:
     date_str = now_hkt.strftime("%Y-%m-%d")           # 今日：用于标题
     date_compact = now_hkt.strftime("%Y%m%d")
@@ -154,11 +155,17 @@ WTI原油：{fxv("WTI", 2)}"""
         fx_block = "▶️二、*關鍵匯率*\n" + warn("匯率")
 
     # ── 第四部分：个股动态 ────────────────────────────────────────────────────
-    # 每只股票用 \n\n 分隔，方便 Telegram 按段切割
+    # 结构：回购子段落（如有）在前，个股新闻在后
+    section4_parts = ["▶️四、*個股動態*"]
+    if buyback_subsection:
+        section4_parts.append(buyback_subsection)
     if stock_sections:
-        stocks_block = "▶️四、*個股動態*\n" + "\n\n".join(stock_sections)
+        if buyback_subsection:
+            section4_parts.append("**個股新聞**")
+        section4_parts.append("\n\n".join(stock_sections))
     else:
-        stocks_block = "▶️四、*個股動態*\n" + warn("個股新聞")
+        section4_parts.append(warn("個股新聞"))
+    stocks_block = "\n\n".join(section4_parts)
 
     # ── 第三部分：宏观 & 行业 ──────────────────────────────────────────────────
     macro_block = macro_section or "▶️三、*宏觀及行業動態*\n• 暫無數據"
@@ -347,8 +354,51 @@ def main():
             logger.error(f"今日招股抓取失败: {e}")
             ipo_section = "▶️五、*今日招股（新股認購）*\n• ⚠️ 數據獲取失敗，請手動補充"
 
-    # ── Step 2c: 抓取个股新闻 ─────────────────────────────────────────────────
-    logger.info("Step 2c: 抓取个股新闻")
+    # ── Step 2c: 豆包回购查询 ─────────────────────────────────────────────────
+    # 豆包搜索全港 24h 回购 → Python 匹配 watchlist → 格式化子段落
+    # 百胜中国（T+2 披露惯例）单独 48h 查询，合并进结果
+    buyback_subsection = ""
+    doubao_buyback_available = bool(os.environ.get("ARK_API_KEY") and (
+        os.environ.get("DOUBAO_BOT_BUYBACK") or os.environ.get("DOUBAO_BOT_MACRO")
+    ))
+
+    if doubao_buyback_available:
+        logger.info("Step 2c: 豆包 API 查询港股回购（24h 全市场 + 百胜中国 48h）")
+        try:
+            from fetchers.doubao_macro import (
+                fetch_doubao_buybacks,
+                fetch_doubao_buyback_yumchina,
+                parse_buyback_lines,
+                match_watchlist_buybacks,
+                fmt_buyback_subsection,
+            )
+            from fetchers.stock_news import HK_STOCKS
+
+            # 24h 全市场回购
+            raw_buybacks = fetch_doubao_buybacks(date_hkt=now_hkt)
+            all_items = parse_buyback_lines(raw_buybacks or "")
+
+            # 百胜中国 48h 专用查询，合并（去重）
+            raw_yum = fetch_doubao_buyback_yumchina(date_hkt=now_hkt)
+            yum_items = parse_buyback_lines(raw_yum or "")
+            existing_codes = {item["code"] for item in all_items}
+            for item in yum_items:
+                if item["code"] not in existing_codes:
+                    all_items.append(item)
+                    existing_codes.add(item["code"])
+
+            # 匹配 watchlist，格式化
+            matched = match_watchlist_buybacks(all_items, HK_STOCKS)
+            buyback_subsection = fmt_buyback_subsection(matched)
+            if matched:
+                logger.info(f"[DoubaoByback] watchlist 命中 {len(matched)} 只：{[m['watchlist_name'] for m in matched]}")
+            else:
+                logger.info("[DoubaoByback] watchlist 内今日无回购")
+        except Exception as e:
+            logger.error(f"豆包回购模块异常: {e}")
+
+    # ── Step 2d: 抓取个股新闻 ─────────────────────────────────────────────────
+    logger.info("Step 2d: 抓取个股新闻")
     try:
         from fetchers.stock_news import fetch_all_stock_news
         all_news = fetch_all_stock_news(request_interval=1.5)
@@ -371,6 +421,7 @@ def main():
         market_data, stock_sections, now_hkt,
         macro_section=macro_section,
         ipo_section=ipo_section,
+        buyback_subsection=buyback_subsection,
     )
 
     # ── Step 5: 保存到文件 ────────────────────────────────────────────────────
