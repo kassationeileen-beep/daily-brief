@@ -13,13 +13,16 @@ _AKSHARE_TIMEOUT = 20  # seconds per akshare call
 
 
 def _timed(fn, label: str, timeout: int = _AKSHARE_TIMEOUT):
-    """在独立线程中运行 fn()，超时则抛出 TimeoutError"""
-    with ThreadPoolExecutor(max_workers=1) as ex:
-        future = ex.submit(fn)
-        try:
-            return future.result(timeout=timeout)
-        except FuturesTimeoutError:
-            raise TimeoutError(f"{label} 请求超时 ({timeout}s)")
+    """在独立线程中运行 fn()，超时则立即抛出 TimeoutError（不等线程结束）"""
+    ex = ThreadPoolExecutor(max_workers=1)
+    future = ex.submit(fn)
+    try:
+        return future.result(timeout=timeout)
+    except FuturesTimeoutError:
+        ex.shutdown(wait=False)
+        raise TimeoutError(f"{label} 请求超时 ({timeout}s)")
+    finally:
+        ex.shutdown(wait=False)
 
 
 def _safe(fn, label: str):
