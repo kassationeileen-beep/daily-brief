@@ -121,12 +121,28 @@ def fetch_southbound_flow() -> dict:
     import akshare as ak
     result = {"net_flow_hkd_100m": None, "direction": None, "error": None}
 
-    # 方法一：stock_hsgt_fund_flow_summary_em（无参数），过滤南向资金行
+    # 方法一：stock_hsgt_fund_min_em 分时数据（push2 实时推送端点，最可靠）
+    # 列：日期, 时间, 港股通(沪), 港股通(深), 南向资金（累计净流入，亿元）
+    # 2024-08-19 交易所更改披露机制后，此端点仍可正常访问
+    try:
+        df = ak.stock_hsgt_fund_min_em(symbol="南向资金")
+        if df is not None and not df.empty:
+            row = df.iloc[-1]  # 取最新分钟（当日最新累计值）
+            val = float(row["南向资金"])
+            if val != 0:  # 0 可能是未开市，跳过
+                result["net_flow_hkd_100m"] = abs(round(val, 2))
+                result["direction"] = "買入" if val >= 0 else "賣出"
+                logger.info(f"[Southbound-min] 南向净流入: {val:.2f} 亿元 ({row['日期']} {row['时间']})")
+                return result
+    except Exception as e:
+        logger.debug(f"[Southbound-min] {e}")
+
+    # 方法二：stock_hsgt_fund_flow_summary_em（无参数），过滤南向资金行
     # 注：该函数无 indicator 参数，返回沪深港通所有方向数据，需按板块过滤
     try:
         df = ak.stock_hsgt_fund_flow_summary_em()
         if df is not None and not df.empty:
-            logger.debug(f"[Southbound-v1] 列名: {list(df.columns)}, 板块值: {df['板块'].unique().tolist()}")
+            logger.debug(f"[Southbound-v1] 板块值: {df['板块'].unique().tolist()}")
             # 过滤南向：港股通沪 + 港股通深（板块列包含"港股通"或"南向"）
             south = df[df["板块"].str.contains("港股通|南向", na=False)]
             if not south.empty:
@@ -138,7 +154,7 @@ def fetch_southbound_flow() -> dict:
     except Exception as e:
         logger.debug(f"[Southbound-v1] {e}")
 
-    # 方法二：stock_hsgt_hist_em 历史数据最新一行
+    # 方法三：stock_hsgt_hist_em 历史数据最新一行
     try:
         df = ak.stock_hsgt_hist_em(symbol="南向资金")
         if df is not None and not df.empty:
