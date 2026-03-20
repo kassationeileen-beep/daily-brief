@@ -69,7 +69,11 @@ def _fetch_cpy_ipo(today: date) -> list[dict]:
         logger.warning(f"[IPO-cpy] 请求失败: {e}")
         return []
 
-    soup = BeautifulSoup(resp.text, "lxml")
+    # 优先用 lxml，没有则降级 html.parser
+    try:
+        soup = BeautifulSoup(resp.text, "lxml")
+    except Exception:
+        soup = BeautifulSoup(resp.text, "html.parser")
 
     # ── 定位表格 ──────────────────────────────────────────────
     # cpy.com.hk 的 IPO 表格通常以 class="ipo" 或 id 包含 "ipo" 标识
@@ -161,6 +165,8 @@ def _fetch_cpy_ipo(today: date) -> list[dict]:
         })
 
     logger.info(f"[IPO-cpy] 今日认购中: {len(results)} 只")
+    if not results:
+        logger.debug(f"[IPO-cpy] 无结果，表头列名: {col_names}, 总行数: {len(rows)}")
     return results
 
 
@@ -184,16 +190,21 @@ def _fetch_akshare_ipo(today: date) -> list[dict]:
         if df is None or df.empty:
             return []
 
-        logger.debug(f"[IPO-akshare] 列名: {list(df.columns)}")
+        logger.info(f"[IPO-akshare] 列名: {list(df.columns)}, 共 {len(df)} 行")
 
-        # 列名映射
-        cols = {c: c for c in df.columns}
-        name_col  = next((c for c in df.columns if "名称" in c or "公司" in c), None)
-        code_col  = next((c for c in df.columns if "代码" in c or "代号" in c), None)
-        price_col = next((c for c in df.columns if "价格" in c or "招股" in c), None)
-        start_col = next((c for c in df.columns if "开始" in c or "起始" in c), None)
-        end_col   = next((c for c in df.columns if "截止" in c or "结束" in c), None)
-        lot_col   = next((c for c in df.columns if "手" in c), None)
+        # 列名映射（兼容东方财富各版本）
+        def _find(keywords):
+            return next((c for c in df.columns if any(kw in c for kw in keywords)), None)
+
+        name_col  = _find(["名称", "公司", "股票名", "证券名"])
+        code_col  = _find(["代码", "代号", "编号"])
+        price_col = _find(["招股价", "发行价", "价格", "价钱"])
+        start_col = _find(["开始", "起始", "认购开始", "认购起"])
+        end_col   = _find(["截止", "结束", "认购截止", "认购结"])
+        lot_col   = _find(["每手", "手数", "手股"])
+
+        logger.debug(f"[IPO-akshare] 列映射: name={name_col} code={code_col} "
+                     f"price={price_col} start={start_col} end={end_col} lot={lot_col}")
 
         for _, row in df.iterrows():
             def _rv(col):
@@ -211,10 +222,11 @@ def _fetch_akshare_ipo(today: date) -> list[dict]:
             elif end_dt:
                 if today > end_dt:
                     continue
+            # 无法解析日期则保留（日期格式可能特殊）
 
-            code = _rv(code_col).lstrip("0")
+            code_val = _rv(code_col).replace(".HK", "").replace("HK:", "").strip().lstrip("0")
             results.append({
-                "code":      code,
+                "code":      code_val,
                 "name":      _rv(name_col),
                 "price_hkd": _rv(price_col),
                 "sub_start": start_str,
@@ -231,17 +243,101 @@ def _fetch_akshare_ipo(today: date) -> list[dict]:
 
 
 # ─────────────────────────────────────────────
+# 备源二：etnet.com.hk
+# ─────────────────────────────────────────────
+
+_ETNET_IPO_URL = "https://www.etnet.com.hk/www/tc/stocks/ipo.php"
+
+def _fetch_etnet_ipo(today: date) -> list[dict]:
+    """
+    爬取 etnet.com.hk 的新股认购列表，抓取今日仍在认购期内的记录。
+    """
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+    except ImportError as e:
+        logger.warning(f"[IPO-etnet] 缺少依赖 {e}")
+        return []
+
+    try:
+        resp = requests.get(_ETNET_IPO_URL, headers=_HEADERS, timeout=15)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    except Exception as e:
+        logger.warning(f"[IPO-etnet] 请求失败: {e}")
+        return []
+
+    try:
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception:
+        return []
+
+    results = []
+    tables = soup.find_all("table")
+    for table in tables:
+        rows = table.find_all("tr")
+        if len(rows) < 2:
+            continue
+        headers_row = rows[0]
+        col_names = [th.get_text(strip=True) for th in headers_row.find_all(["th", "td"])]
+        if not any(kw in " ".join(col_names) for kw in ["股票", "公司", "招股", "認購", "认购"]):
+            continue
+
+        logger.debug(f"[IPO-etnet] 表头: {col_names}")
+
+        def _find_col(keywords):
+            for i, name in enumerate(col_names):
+                if any(kw in name for kw in keywords):
+                    return i
+            return -1
+
+        idx_name  = _find_col(["公司", "名稱", "名称", "股票"])
+        idx_code  = _find_col(["代號", "代号", "編號"])
+        idx_price = _find_col(["招股價", "招股价", "發行", "Price"])
+        idx_end   = _find_col(["截止", "結束", "到期"])
+        idx_lot   = _find_col(["每手", "手數"])
+
+        for row in rows[1:]:
+            cells = row.find_all(["td", "th"])
+            if len(cells) < 2:
+                continue
+            txt = [c.get_text(strip=True) for c in cells]
+
+            def _get(idx):
+                return txt[idx] if 0 <= idx < len(txt) else ""
+
+            name = _get(idx_name) if idx_name >= 0 else txt[0]
+            if not name:
+                continue
+
+            end_str = _get(idx_end) if idx_end >= 0 else ""
+            end_dt  = _parse_hk_date(end_str)
+            if end_dt and today > end_dt:
+                continue  # 已截止
+
+            results.append({
+                "code":      _get(idx_code).replace("HK:", "").strip().lstrip("0"),
+                "name":      name,
+                "price_hkd": _get(idx_price) if idx_price >= 0 else "N/A",
+                "sub_start": "",
+                "sub_end":   end_str,
+                "lot_size":  _get(idx_lot) if idx_lot >= 0 else "",
+                "source":    "etnet.com.hk",
+            })
+        break  # 找到第一个有效表就退出
+
+    logger.info(f"[IPO-etnet] 今日认购中: {len(results)} 只")
+    return results
+
+
+# ─────────────────────────────────────────────
 # 统一入口
 # ─────────────────────────────────────────────
 
 def fetch_hk_ipo_today(today: Optional[date] = None) -> list[dict]:
     """
     获取今日港股认购新股列表。
-    主: cpy.com.hk → 备: akshare → 均失败则返回空列表。
-    返回格式：
-      [{"code": "1234", "name": "公司名", "price_hkd": "3.00",
-        "sub_start": "18/03/2026", "sub_end": "24/03/2026",
-        "lot_size": "1000", "source": "cpy.com.hk"}, ...]
+    主: cpy.com.hk → 备1: akshare → 备2: etnet.com.hk → 均失败则返回空列表。
     """
     if today is None:
         from datetime import timezone, timedelta
@@ -255,8 +351,13 @@ def fetch_hk_ipo_today(today: Optional[date] = None) -> list[dict]:
     if ipo_list:
         return ipo_list
 
-    logger.info("[IPO] 主源失败，尝试 akshare 备源")
+    logger.info("[IPO] cpy 主源失败，尝试 akshare 备源")
     ipo_list = _fetch_akshare_ipo(today)
+    if ipo_list:
+        return ipo_list
+
+    logger.info("[IPO] akshare 备源失败，尝试 etnet 备源")
+    ipo_list = _fetch_etnet_ipo(today)
     return ipo_list
 
 

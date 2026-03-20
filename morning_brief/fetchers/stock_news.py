@@ -228,6 +228,80 @@ def fetch_us_news(ticker: str, name: str, max_items: int = 10) -> list[dict]:
 
 
 # ─────────────────────────────────────────────
+# 港股回购公告（hkexnews.hk）
+# ─────────────────────────────────────────────
+
+def fetch_hk_buyback_announcements(code: str, name: str, days: int = 2) -> list[dict]:
+    """
+    从 hkexnews.hk 抓取近 days 天内该股的回购相关公告（Share Repurchase / Monthly Return）。
+    公告标题含回购关键词时纳入，作为个股新闻的前置补充，确保 LLM 能看到。
+    """
+    import requests
+    from datetime import date, timedelta
+    today = date.today()
+    from_dt = (today - timedelta(days=days)).strftime("%Y%m%d")
+    to_dt = today.strftime("%Y%m%d")
+
+    url = "https://www1.hkexnews.hk/search/titlesearch.xhtml"
+    params = {
+        "lang": "EN",
+        "scode": code.zfill(5),
+        "sdatefrom": from_dt,
+        "sdateto": to_dt,
+        "statype": "",
+        "category": "0",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www1.hkexnews.hk/",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    BUYBACK_KEYWORDS = [
+        "repurchase", "buyback", "buy-back",
+        "monthly return",       # HKEx Monthly Return 包含回购数据
+        "回購", "share buy",
+    ]
+
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.debug(f"[HKExNews-buyback/{code}] 请求失败: {e}")
+        return []
+
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as e:
+        logger.debug(f"[HKExNews-buyback/{code}] 解析失败: {e}")
+        return []
+
+    results = []
+    # hkexnews.hk 搜索结果通常在 class 含 "title" 的 table 或 div 里
+    for row in soup.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            continue
+        # 标题通常在第2或3列
+        title = max((c.get_text(strip=True) for c in cells), key=len)
+        if not any(kw.lower() in title.lower() for kw in BUYBACK_KEYWORDS):
+            continue
+        date_cell = cells[0].get_text(strip=True)
+        results.append({
+            "title": f"[港交所披露] {title}",
+            "content": f"港交所公告｜{name}（{code}）：{title}",
+            "time": date_cell,
+        })
+
+    if results:
+        logger.info(f"[HKExNews-buyback/{code}/{name}] 找到 {len(results)} 条回购公告")
+    else:
+        logger.debug(f"[HKExNews-buyback/{code}/{name}] 无回购公告")
+    return results
+
+
+# ─────────────────────────────────────────────
 # 统一抓取所有个股新闻
 # ─────────────────────────────────────────────
 
@@ -248,8 +322,12 @@ def fetch_all_stock_news(request_interval: float = 1.5) -> dict:
         if not news:
             logger.debug(f"[{code}] 主接口无数据，尝试备用")
             news = fetch_hk_news_alt(code, name)
+        # 回购公告前置（来自港交所披露，Yahoo RSS 通常不包含）
+        buyback = fetch_hk_buyback_announcements(code, name)
+        if buyback:
+            news = buyback + news
         result["hk"][code] = {"name": name, "news": news}
-        logger.debug(f"  {code} {name}: {len(news)} 条")
+        logger.debug(f"  {code} {name}: {len(news)} 条（含回购 {len(buyback)} 条）")
         time.sleep(request_interval)
 
     logger.info(f"抓取A股新闻（{len(A_STOCKS)} 只）...")
