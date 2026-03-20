@@ -307,7 +307,7 @@ def fetch_doubao_ipo(date_hkt: datetime = None) -> Optional[str]:
     user_prompt = _USER_IPO.format(date=date_str, month=month, day=day)
 
     try:
-        output = _call_doubao(system_prompt, user_prompt, bot_id, max_tokens=1500)
+        output = _call_doubao(system_prompt, user_prompt, bot_id, max_tokens=2000)
         logger.info(f"[DoubaoIPO] 成功，{len(output)} 字")
         return output
     except Exception as e:
