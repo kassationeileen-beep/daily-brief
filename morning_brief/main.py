@@ -273,27 +273,82 @@ def main():
         logger.error(f"市场数据模块失败: {e}")
         market_data = {}
 
-    # ── Step 2a: 抓取宏观新闻 ─────────────────────────────────────────────────
-    logger.info("Step 2a: 抓取宏观 & 行业新闻")
-    try:
-        from fetchers.macro_news import fetch_macro_news
-        macro_news_items = fetch_macro_news()
-    except Exception as e:
-        logger.error(f"宏观新闻抓取失败: {e}")
-        macro_news_items = []
+    # ── Step 2a: 豆包宏观（优先） ─────────────────────────────────────────────
+    # 若配置了 ARK_API_KEY + DOUBAO_BOT_MACRO*，则用豆包直接生成宏观段落；
+    # 否则（或豆包失败）降级到 RSS + LLM 方案。
+    macro_section = None
+    doubao_available = bool(os.environ.get("ARK_API_KEY") and (
+        os.environ.get("DOUBAO_BOT_MACRO") or
+        os.environ.get("DOUBAO_BOT_MACRO_CN") or
+        os.environ.get("DOUBAO_BOT_MACRO_GLOBAL")
+    ))
 
-    # ── Step 2b: 抓取今日招股 ─────────────────────────────────────────────────
-    logger.info("Step 2b: 抓取今日招股")
-    try:
-        from fetchers.ipo_fetcher import fetch_hk_ipo_today, fmt_ipo_section
-        ipo_list = fetch_hk_ipo_today(today=now_hkt.date())
-        ipo_section = fmt_ipo_section(ipo_list)
-    except Exception as e:
-        logger.error(f"今日招股抓取失败: {e}")
-        ipo_section = "▶️五、*今日招股（新股認購）*\n• ⚠️ 數據獲取失敗，請手動補充"
+    if doubao_available:
+        logger.info("Step 2a: 豆包 API 拉取宏观要闻（中国 + 全球）")
+        try:
+            from fetchers.doubao_macro import (
+                fetch_doubao_macro_cn,
+                fetch_doubao_macro_global,
+                build_doubao_macro_section,
+            )
+            cn_text = fetch_doubao_macro_cn(date_hkt=now_hkt)
+            global_text = fetch_doubao_macro_global(date_hkt=now_hkt)
+            macro_section = build_doubao_macro_section(cn_text, global_text, date_hkt=now_hkt)
+            if macro_section:
+                logger.info("[DoubaoMacro] 宏观段落生成成功，跳过 RSS+LLM 方案")
+            else:
+                logger.warning("[DoubaoMacro] 中国/全球宏观均失败，降级到 RSS+LLM")
+        except Exception as e:
+            logger.error(f"豆包宏观模块异常: {e}，降级到 RSS+LLM")
 
-    # ── Step 2: 抓取个股新闻 ──────────────────────────────────────────────────
-    logger.info("Step 2: 抓取个股新闻")
+    if macro_section is None:
+        # 降级：RSS 抓取 + LLM 提炼
+        logger.info("Step 2a (降级): 抓取宏观 RSS + LLM 提炼")
+        try:
+            from fetchers.macro_news import fetch_macro_news
+            macro_news_items = fetch_macro_news()
+        except Exception as e:
+            logger.error(f"宏观新闻抓取失败: {e}")
+            macro_news_items = []
+        try:
+            from llm.refiner import refine_macro_news
+            macro_section = refine_macro_news(macro_news_items)
+        except Exception as e:
+            logger.error(f"宏观LLM提炼失败: {e}")
+            macro_section = "▶️三、*宏觀及行業動態*\n• ⚠️ LLM提炼失败，请手动补充"
+
+    # ── Step 2b: 今日招股 ─────────────────────────────────────────────────────
+    # 豆包优先（信息更丰富）→ 爬虫备用
+    ipo_section = None
+    doubao_ipo_available = bool(os.environ.get("ARK_API_KEY") and (
+        os.environ.get("DOUBAO_BOT_IPO") or os.environ.get("DOUBAO_BOT_MACRO")
+    ))
+
+    if doubao_ipo_available:
+        logger.info("Step 2b: 豆包 API 拉取今日招股信息")
+        try:
+            from fetchers.doubao_macro import fetch_doubao_ipo, fmt_doubao_ipo_section
+            doubao_ipo_text = fetch_doubao_ipo(date_hkt=now_hkt)
+            if doubao_ipo_text:
+                ipo_section = fmt_doubao_ipo_section(doubao_ipo_text)
+                logger.info("[DoubaoIPO] 招股信息生成成功，跳过爬虫方案")
+            else:
+                logger.warning("[DoubaoIPO] 豆包 IPO 失败，降级到爬虫")
+        except Exception as e:
+            logger.error(f"豆包招股模块异常: {e}，降级到爬虫")
+
+    if ipo_section is None:
+        logger.info("Step 2b (降级): 爬虫抓取今日招股")
+        try:
+            from fetchers.ipo_fetcher import fetch_hk_ipo_today, fmt_ipo_section
+            ipo_list = fetch_hk_ipo_today(today=now_hkt.date())
+            ipo_section = fmt_ipo_section(ipo_list)
+        except Exception as e:
+            logger.error(f"今日招股抓取失败: {e}")
+            ipo_section = "▶️五、*今日招股（新股認購）*\n• ⚠️ 數據獲取失敗，請手動補充"
+
+    # ── Step 2c: 抓取个股新闻 ─────────────────────────────────────────────────
+    logger.info("Step 2c: 抓取个股新闻")
     try:
         from fetchers.stock_news import fetch_all_stock_news
         all_news = fetch_all_stock_news(request_interval=1.5)
@@ -301,17 +356,10 @@ def main():
         logger.error(f"个股新闻模块失败: {e}")
         all_news = {}
 
-    # ── Step 3: LLM 提炼 ──────────────────────────────────────────────────────
-    logger.info("Step 3a: LLM 提炼宏观动态")
+    # ── Step 3: LLM 提炼个股动态 ──────────────────────────────────────────────
+    logger.info("Step 3: LLM 提炼个股动态")
     try:
-        from llm.refiner import refine_macro_news, refine_all_stocks
-        macro_section = refine_macro_news(macro_news_items)
-    except Exception as e:
-        logger.error(f"宏观LLM提炼失败: {e}")
-        macro_section = "▶️三、*宏觀及行業動態*\n• ⚠️ LLM提炼失败，请手动补充"
-
-    logger.info("Step 3b: LLM 提炼个股动态")
-    try:
+        from llm.refiner import refine_all_stocks
         stock_sections = refine_all_stocks(all_news, llm_interval=1.0)
     except Exception as e:
         logger.error(f"LLM 提炼失败: {e}")
