@@ -1,6 +1,7 @@
 """
 macro_news.py — 第三部分：宏观 & 行业新闻抓取
-来源优先级（均为公开RSS，无需认证）：
+来源优先级：
+  0. 金十数据快讯 API（实时中文宏观快讯，首选）
   1. Reuters Business/Markets（稳定，英文）
   2. Bloomberg Markets（英文）
   3. SCMP Business（英文，港媒）
@@ -98,6 +99,91 @@ MACRO_KEYWORDS = [
 NEWS_MAX_AGE_HOURS = 20  # 只保留20小时内的新闻（早报前一天傍晚至今）
 MAX_ITEMS_PER_FEED = 10
 
+# ─────────────────────────────────────────────
+# 金十数据快讯 API
+# ─────────────────────────────────────────────
+
+JIN10_FLASH_URL = "https://flash-api.jin10.com/get_flash_list"
+JIN10_HEADERS = {
+    "x-app-id": "bVBF4FyRTn5NJF5n",
+    "x-version": "1.0.0",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+}
+JIN10_PARAMS = {"channel": "-8200", "vip": "1"}
+JIN10_MAX_ITEMS = 50  # 最多拉取条数
+
+
+def fetch_jin10_flash(max_age_hours: int = NEWS_MAX_AGE_HOURS) -> list[dict]:
+    """
+    抓取金十数据快讯，过滤宏观关键词后返回。
+    返回: [{title, content, time, source, lang}, ...]
+    """
+    try:
+        import requests
+    except ImportError:
+        logger.warning("[Jin10] 缺少 requests 依赖，跳过")
+        return []
+
+    try:
+        resp = requests.get(
+            JIN10_FLASH_URL, headers=JIN10_HEADERS, params=JIN10_PARAMS, timeout=12
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning(f"[Jin10] 请求失败: {e}")
+        return []
+
+    # 响应格式：{"data": {"items": [...]}} 或 {"data": [...]}
+    try:
+        raw = data.get("data") or {}
+        if isinstance(raw, list):
+            items = raw
+        else:
+            items = raw.get("items") or []
+    except Exception:
+        logger.warning("[Jin10] 响应格式异常")
+        return []
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    results = []
+
+    for item in items[:JIN10_MAX_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+
+        content = (item.get("content") or item.get("body") or "").strip()
+        if not content:
+            continue
+
+        # 时间解析（格式通常为 "2026-03-20 10:30:00"）
+        time_str = item.get("time") or item.get("created_at") or ""
+        pub_dt = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+            try:
+                pub_dt = datetime.strptime(time_str[:19], fmt).replace(tzinfo=timezone.utc)
+                break
+            except ValueError:
+                continue
+
+        if pub_dt and pub_dt < cutoff:
+            continue  # 超出时间窗口
+
+        # 关键词过滤
+        if not _keyword_match(content):
+            continue
+
+        results.append({
+            "title": content[:80],        # 快讯无独立标题，取前80字作标题
+            "content": content[:300],
+            "time": time_str,
+            "source": "金十快讯",
+            "lang": "zh",
+        })
+
+    logger.info(f"[Jin10] 命中 {len(results)} 条宏观快讯")
+    return results
+
 
 def _is_recent(pub_time_str: str, max_hours: int = NEWS_MAX_AGE_HOURS) -> bool:
     """判断文章是否在 max_hours 内"""
@@ -151,8 +237,15 @@ def fetch_macro_news(include_sectors: bool = True) -> list[dict]:
     """
     抓取宏观 + 行业新闻，合并去重后返回。
     返回: [{title, content, time, source, lang}, ...]
+    金十快讯优先（实时中文），RSS源作为补充。
     """
     all_items = []
+
+    # 优先：金十数据快讯（实时，中文）
+    jin10_items = fetch_jin10_flash()
+    all_items.extend(jin10_items)
+
+    # 补充：RSS源
     feeds = MACRO_FEEDS + (SECTOR_FEEDS if include_sectors else [])
 
     for feed in feeds:
