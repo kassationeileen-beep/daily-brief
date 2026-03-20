@@ -10,6 +10,9 @@ import textwrap
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+# 确保 fetchers/llm 等子包可被直接导入
+sys.path.insert(0, str(Path(__file__).parent))
+
 # ── 日志配置 ──────────────────────────────────────────────────────────────────
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
