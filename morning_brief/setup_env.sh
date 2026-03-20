@@ -4,17 +4,21 @@
 
 set -e
 
-# 兼容不同系统：优先用 pip3，其次 python3 -m pip，最后 pip
-if command -v pip3 &>/dev/null; then
-    PIP="pip3"
-elif command -v python3 &>/dev/null; then
-    PIP="python3 -m pip"
-else
-    PIP="pip"
+PYTHON=$(command -v python3 || command -v python)
+echo "使用 Python: $PYTHON"
+
+# 确保 pip 可用
+if ! $PYTHON -m pip --version &>/dev/null; then
+    echo "=== 引导安装 pip ==="
+    $PYTHON -m ensurepip --upgrade 2>/dev/null || {
+        echo "ensurepip 不可用，用 get-pip.py 安装..."
+        curl -sS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+        $PYTHON /tmp/get-pip.py --user
+    }
 fi
 
-PYTHON=$(command -v python3 || command -v python)
-echo "使用 Python: $PYTHON  Pip: $PIP"
+PIP="$PYTHON -m pip"
+echo "Pip: $PIP"
 
 echo "=== 安装 Python 依赖 ==="
 $PIP install -r requirements.txt
