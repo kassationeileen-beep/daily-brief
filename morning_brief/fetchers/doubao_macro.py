@@ -70,7 +70,7 @@ _SYSTEM_MACRO_CN = """你是服务香港证券从业者的专业金融早报编�
 - 不輸出解釋性前言後語
 - 過去24小時內無重要事件時，輸出「• 過去24小時暫無重要中國宏觀動態」"""
 
-_USER_MACRO_CN = "今天是{date}（北京時間早上07:30），請搜索過去24小時內（即{yesterday}至今）發布的中國宏觀要聞，嚴格限定在此時間範圍，按格式輸出。"
+_USER_MACRO_CN = "今天是{date}，現在是北京時間07:30，請搜索過去24小時（昨日07:30至今）內發布的中國宏觀要聞，嚴格限定在此時間範圍，按格式輸出。"
 
 # ── 全球宏观 ────────────────────────────────
 _SYSTEM_MACRO_GLOBAL = """你是服务香港证券从业者的专业金融早报编辑。
@@ -101,7 +101,7 @@ _SYSTEM_MACRO_GLOBAL = """你是服务香港证券从业者的专业金融早报
 - 不輸出解釋性前言後語
 - 過去24小時內無重要事件時，輸出「• 過去24小時暫無重要全球宏觀動態」"""
 
-_USER_MACRO_GLOBAL = "今天是{date}（北京時間早上07:30），請搜索過去24小時內（即{yesterday}至今）發布的全球宏觀要聞（美聯儲、各地央行、能源大宗、地緣政治），嚴格限定在此時間範圍，按格式輸出。"
+_USER_MACRO_GLOBAL = "今天是{date}，現在是北京時間07:30，請搜索過去24小時（昨日07:30至今）內發布的全球宏觀要聞（美聯儲、各地央行、能源大宗、地緣政治），嚴格限定在此時間範圍，按格式輸出。"
 
 # ── 港股今日招股 ─────────────────────────────
 # Python 根据 DATES 元数据行判断首日/续期，分别格式化
@@ -231,8 +231,7 @@ def fetch_doubao_macro_cn(date_hkt: datetime = None) -> Optional[str]:
         date_hkt = datetime.now(HKT)
 
     date_str = date_hkt.strftime("%Y年%m月%d日")
-    yesterday_str = (date_hkt - timedelta(days=1)).strftime("%Y年%m月%d日")
-    user_prompt = _USER_MACRO_CN.format(date=date_str, yesterday=yesterday_str)
+    user_prompt = _USER_MACRO_CN.format(date=date_str)
 
     try:
         output = _call_doubao(_SYSTEM_MACRO_CN, user_prompt, bot_id, max_tokens=600)
@@ -258,8 +257,7 @@ def fetch_doubao_macro_global(date_hkt: datetime = None) -> Optional[str]:
         date_hkt = datetime.now(HKT)
 
     date_str = date_hkt.strftime("%Y年%m月%d日")
-    yesterday_str = (date_hkt - timedelta(days=1)).strftime("%Y年%m月%d日")
-    user_prompt = _USER_MACRO_GLOBAL.format(date=date_str, yesterday=yesterday_str)
+    user_prompt = _USER_MACRO_GLOBAL.format(date=date_str)
 
     try:
         output = _call_doubao(_SYSTEM_MACRO_GLOBAL, user_prompt, bot_id, max_tokens=800)
