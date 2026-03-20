@@ -120,31 +120,34 @@ def fetch_southbound_flow() -> dict:
     """南向资金（港股通）净流入，单位亿港元"""
     import akshare as ak
     result = {"net_flow_hkd_100m": None, "direction": None, "error": None}
+
+    # 方法一：stock_hsgt_fund_flow_summary_em（无参数），过滤南向资金行
+    # 注：该函数无 indicator 参数，返回沪深港通所有方向数据，需按板块过滤
     try:
-        # 方法一：hsgt_fund_flow_summary_em
-        df = ak.stock_hsgt_fund_flow_summary_em(indicator="南向资金")
+        df = ak.stock_hsgt_fund_flow_summary_em()
         if df is not None and not df.empty:
-            row = df.iloc[-1]
-            for col in ["今日净流入（亿元）", "净流入（亿）", "当日净买入（亿元）", "净买入"]:
-                if col in df.columns:
-                    val = float(row[col])
-                    result["net_flow_hkd_100m"] = abs(round(val, 2))
-                    result["direction"] = "買入" if val >= 0 else "賣出"
-                    return result
+            logger.debug(f"[Southbound-v1] 列名: {list(df.columns)}, 板块值: {df['板块'].unique().tolist()}")
+            # 过滤南向：港股通沪 + 港股通深（板块列包含"港股通"或"南向"）
+            south = df[df["板块"].str.contains("港股通|南向", na=False)]
+            if not south.empty:
+                val = float(south["成交净买额"].sum())  # 已转换为亿元
+                result["net_flow_hkd_100m"] = abs(round(val, 2))
+                result["direction"] = "買入" if val >= 0 else "賣出"
+                logger.info(f"[Southbound-v1] 南向净买额: {val:.2f} 亿元")
+                return result
     except Exception as e:
         logger.debug(f"[Southbound-v1] {e}")
 
+    # 方法二：stock_hsgt_hist_em 历史数据最新一行
     try:
-        # 方法二：stock_em_hsgt_north_net_flow_in（接口有南向选项）
-        df = ak.stock_em_hsgt_north_net_flow_in(indicator="南向资金")
+        df = ak.stock_hsgt_hist_em(symbol="南向资金")
         if df is not None and not df.empty:
-            row = df.iloc[-1]
-            for col in df.columns:
-                if "净" in col or "flow" in col.lower():
-                    val = float(row[col])
-                    result["net_flow_hkd_100m"] = abs(round(val, 2))
-                    result["direction"] = "買入" if val >= 0 else "賣出"
-                    return result
+            row = df.iloc[-1]  # 已按日期升序排列
+            val = float(row["当日成交净买额"])  # 单位亿元
+            result["net_flow_hkd_100m"] = abs(round(val, 2))
+            result["direction"] = "買入" if val >= 0 else "賣出"
+            logger.info(f"[Southbound-v2] 南向净买额: {val:.2f} 亿元 (日期: {row['日期']})")
+            return result
     except Exception as e:
         logger.debug(f"[Southbound-v2] {e}")
 
