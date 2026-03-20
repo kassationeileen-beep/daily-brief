@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Environment variables
+.env
+.env.local
+
+# Logs
+morning_brief/logs/
+
+# Output files
+morning_brief/output/
+
+# Seen events cache
+morning_brief/seen_events.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
