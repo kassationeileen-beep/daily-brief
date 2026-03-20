@@ -44,7 +44,8 @@ DEFAULT_TIMEOUT = 90
 _SYSTEM_MACRO_CN = """你是服务香港证券从业者的专业金融早报编辑。
 每日早报发布时间：北京时间 07:30。
 
-任务：搜索今日中国宏观要闻，整理为结构化要点。
+任务：搜索过去24小时内发布的中国宏观要闻，整理为结构化要点。
+时间范围：严格限定为过去24小时内披露/发布的信息，不得引用更早的旧闻。
 
 【输出格式，严格遵守】
 🔸中國宏觀（3條左右）
@@ -67,15 +68,16 @@ _SYSTEM_MACRO_CN = """你是服务香港证券从业者的专业金融早报编�
 - 數字保留具體值（如 3.0%、375億元）
 - 每個主題下1-3個子要點
 - 不輸出解釋性前言後語
-- 不輸出「暫無重要事件」等佔位語句；若真無重要事件，輸出「• 今日暫無重要中國宏觀動態」"""
+- 過去24小時內無重要事件時，輸出「• 過去24小時暫無重要中國宏觀動態」"""
 
-_USER_MACRO_CN = "今天是{date}（北京時間早上），請搜索今日中國宏觀要聞，按格式輸出。"
+_USER_MACRO_CN = "今天是{date}（北京時間早上07:30），請搜索過去24小時內（即{yesterday}至今）發布的中國宏觀要聞，嚴格限定在此時間範圍，按格式輸出。"
 
 # ── 全球宏观 ────────────────────────────────
 _SYSTEM_MACRO_GLOBAL = """你是服务香港证券从业者的专业金融早报编辑。
 每日早报发布时间：北京时间 07:30。
 
-任务：搜索今日全球宏观要闻，整理为结构化要点。
+任务：搜索过去24小时内发布的全球宏观要闻，整理为结构化要点。
+时间范围：严格限定为过去24小时内披露/发布的信息，不得引用更早的旧闻。
 
 【输出格式，严格遵守】
 🔸全球宏觀（3-5條）
@@ -97,36 +99,63 @@ _SYSTEM_MACRO_GLOBAL = """你是服务香港证券从业者的专业金融早报
 - 數字保留具體值（如 3.5%–3.75%、WTI $72/桶）
 - 每個主題下1-3個子要點
 - 不輸出解釋性前言後語
-- 若真無重要事件，輸出「• 今日暫無重要全球宏觀動態」"""
+- 過去24小時內無重要事件時，輸出「• 過去24小時暫無重要全球宏觀動態」"""
 
-_USER_MACRO_GLOBAL = "今天是{date}（北京時間早上），請搜索今日全球宏觀要聞（美聯儲、各地央行、能源大宗、地緣政治），按格式輸出。"
+_USER_MACRO_GLOBAL = "今天是{date}（北京時間早上07:30），請搜索過去24小時內（即{yesterday}至今）發布的全球宏觀要聞（美聯儲、各地央行、能源大宗、地緣政治），嚴格限定在此時間範圍，按格式輸出。"
 
 # ── 港股今日招股 ─────────────────────────────
+# Python 根据 DATES 元数据行判断首日/续期，分别格式化
 _SYSTEM_IPO = """你是服务香港证券从业者的专业金融早报编辑。
 每日早报发布时间：北京时间 07:30。
 
-任务：搜索今日（认购期包含今日）的港股新股认购（IPO申购）信息，输出详细介绍。
+任务：搜索今日（认购期包含今日）的港股新股认购（IPO申购）信息。
 
-【输出格式，严格遵守——每只新股输出以下结构】
-📅 今日（{month}月{day}日）港股招股：[公司名]（[股票代碼].HK）
+【输出格式，严格遵守——每只新股必须先输出一行 DATES 元数据，再输出详细信息】
+
+格式如下（每只新股一块，中间空行分隔）：
+DATES: [股票代碼（4-5位）]|[公司名]|[認購開始日YYYY-MM-DD]|[認購截止日YYYY-MM-DD]
+📅 [公司名]（[股票代碼].HK）
 公司介紹：[業務定位、核心優勢、市場地位，1-2句]
 財務數據：[最近完整財年營收、淨利潤、毛利率；若有最新季度/半年數據也列出，並標明同比趨勢]
 • 招股期：[開始日期]—[截止日期]
 • 全球發售：[發售股數及港股/國際配比]
 • 發行價：定價[X]港元/股，每手[X]股
 • 基石投資：[基石投資者名稱]，認購金額：[金額]（如有）
-• 獨家保薦：[保薦人]（如有多家列出）
+• 獨家保薦：[保薦人]
 • 定價日：[日期]；上市日：[日期]
 • 募資用途：[主要用途，1句]
 
-【若今日有多只新股，逐一輸出，中間用空行分隔】
 【若今日無新股認購，輸出：今日無港股新股認購】
 【約束】
+- DATES 行必須在每只股票信息的最前面
+- DATES 行的日期格式必須為 YYYY-MM-DD（如 2026-03-20）
 - 使用繁體中文
 - 數字保留具體值
 - 不輸出解釋性前言後語"""
 
-_USER_IPO = "今天是{date}，請搜索今日（{month}月{day}日）仍在認購期的港股新股（IPO申購）信息，按格式輸出。"
+_USER_IPO = "今天是{date}，請搜索今日（{month}月{day}日）仍在認購期的港股新股（IPO申購）信息，按格式輸出（每只股票先輸出 DATES 行）。"
+
+# ── 资金动态 ──────────────────────────────────
+# cron 在 07:30 运行，港股/A股尚未开市，需查询最近一个交易日数据
+_SYSTEM_MARKET_SUMMARY = """你是港股/A股市場數據助手。
+任務：查詢最近一個交易日（非今日，因今日市場尚未開市）的以下三項市場數據。
+
+【輸出格式，嚴格遵守，每行一個字段】
+TRADING_DATE: YYYY-MM-DD
+HSI_CLOSE: [收盤點數，數字，如 20500.00]
+HSI_PCT: [漲跌幅，帶正負號，如 +1.25% 或 -0.88%]
+HSI_TURNOVER_100M: [港股全日成交額，單位億港元，數字，如 1250.5]
+SB_DIRECTION: [南向資金方向，只填「流入」或「流出」]
+SB_AMOUNT_100M: [南向資金淨額，絕對值，單位億港元，數字，如 125.3]
+A_TURNOVER_TRILLION: [滬深兩市合計成交額，單位萬億元人民幣，數字，如 1.25]
+
+【約束】
+- 只輸出上述7行，不輸出任何說明或前言後語
+- 所有數字字段只填數字（不帶單位），單位已在字段名中標注
+- TRADING_DATE 必須是最近一個有效交易日（排除今日、週末及公眾假期）
+- 若某字段數據確實無法獲取，填 N/A"""
+
+_USER_MARKET_SUMMARY = "今天是{date}（北京時間早上07:30，港股/A股尚未開市），請查詢最近一個交易日的恒生指數、港股成交額、南向資金（北水）、滬深兩市成交額，按格式輸出。"
 
 
 # ─────────────────────────────────────────────
@@ -202,7 +231,8 @@ def fetch_doubao_macro_cn(date_hkt: datetime = None) -> Optional[str]:
         date_hkt = datetime.now(HKT)
 
     date_str = date_hkt.strftime("%Y年%m月%d日")
-    user_prompt = _USER_MACRO_CN.format(date=date_str)
+    yesterday_str = (date_hkt - timedelta(days=1)).strftime("%Y年%m月%d日")
+    user_prompt = _USER_MACRO_CN.format(date=date_str, yesterday=yesterday_str)
 
     try:
         output = _call_doubao(_SYSTEM_MACRO_CN, user_prompt, bot_id, max_tokens=600)
@@ -228,7 +258,8 @@ def fetch_doubao_macro_global(date_hkt: datetime = None) -> Optional[str]:
         date_hkt = datetime.now(HKT)
 
     date_str = date_hkt.strftime("%Y年%m月%d日")
-    user_prompt = _USER_MACRO_GLOBAL.format(date=date_str)
+    yesterday_str = (date_hkt - timedelta(days=1)).strftime("%Y年%m月%d日")
+    user_prompt = _USER_MACRO_GLOBAL.format(date=date_str, yesterday=yesterday_str)
 
     try:
         output = _call_doubao(_SYSTEM_MACRO_GLOBAL, user_prompt, bot_id, max_tokens=800)
@@ -268,6 +299,187 @@ def fetch_doubao_ipo(date_hkt: datetime = None) -> Optional[str]:
     except Exception as e:
         logger.warning(f"[DoubaoIPO] 调用失败: {e}")
         return None
+
+
+def fetch_doubao_market_summary(date_hkt: datetime = None) -> Optional[str]:
+    """
+    用豆包 API 查询最近一个交易日的港股/A股资金动态摘要。
+    cron 在 07:30 运行，今日市场未开盘，固定查询最近一个已收盘的交易日。
+    返回原始 KEY: VALUE 文本（供 parse_market_summary 解析），或 None。
+    """
+    bot_id = _get_bot_id("DOUBAO_BOT_MARKET", fallback_env="DOUBAO_BOT_MACRO")
+    if not bot_id:
+        logger.debug("[DoubaoMarket] 未配置 Bot ID，跳过")
+        return None
+
+    if date_hkt is None:
+        HKT = timezone(timedelta(hours=8))
+        date_hkt = datetime.now(HKT)
+
+    date_str = date_hkt.strftime("%Y年%m月%d日")
+    user_prompt = _USER_MARKET_SUMMARY.format(date=date_str)
+
+    try:
+        output = _call_doubao(_SYSTEM_MARKET_SUMMARY, user_prompt, bot_id, max_tokens=200)
+        logger.info(f"[DoubaoMarket] 成功，{len(output)} 字")
+        return output
+    except Exception as e:
+        logger.warning(f"[DoubaoMarket] 调用失败: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────
+# 资金动态解析
+# ─────────────────────────────────────────────
+
+def parse_market_summary(raw_text: str) -> dict:
+    """
+    解析豆包返回的资金动态 KEY: VALUE 文本，返回与 market_data 兼容的 dict：
+    {
+      "hsi":        {"close": float, "pct": float, "turnover_hkd_100m": float},
+      "southbound": {"net_flow_hkd_100m": float, "direction": "买入"|"卖出"},
+      "a_share":    {"total_turnover_trillion": float},
+      "trading_date": "2026-03-19",
+    }
+    缺失/无效字段置为 None，不抛异常。
+    """
+    def _parse_float(s: str) -> Optional[float]:
+        if not s or s.strip().upper() == "N/A":
+            return None
+        # 去掉 %、+ 号等
+        s = s.strip().lstrip("+").rstrip("%").replace(",", "")
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    kv = {}
+    for line in raw_text.splitlines():
+        if ":" in line:
+            key, _, val = line.partition(":")
+            kv[key.strip()] = val.strip()
+
+    direction_raw = kv.get("SB_DIRECTION", "")
+    if "流入" in direction_raw:
+        sb_direction = "买入"
+    elif "流出" in direction_raw:
+        sb_direction = "卖出"
+    else:
+        sb_direction = None
+
+    return {
+        "hsi": {
+            "close":               _parse_float(kv.get("HSI_CLOSE")),
+            "pct":                 _parse_float(kv.get("HSI_PCT")),
+            "turnover_hkd_100m":   _parse_float(kv.get("HSI_TURNOVER_100M")),
+        },
+        "southbound": {
+            "net_flow_hkd_100m":   _parse_float(kv.get("SB_AMOUNT_100M")),
+            "direction":           sb_direction,
+        },
+        "a_share": {
+            "total_turnover_trillion": _parse_float(kv.get("A_TURNOVER_TRILLION")),
+        },
+        "trading_date": kv.get("TRADING_DATE", ""),
+    }
+
+
+# ─────────────────────────────────────────────
+# IPO 首日 vs 续期格式化
+# ─────────────────────────────────────────────
+
+def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
+    """
+    根据豆包 IPO 原始输出，按招股首日/续期分别格式化：
+    - 首日（sub_start == today）：保留完整详细信息块
+    - 续期（sub_start < today）：只输出简短提醒
+      "正在招股：\n公司名（XXXXX.HK）：M月D日—M月D日"
+
+    豆包输出每只 IPO 以 DATES 行开头：
+    DATES: 02729|凯乐士科技|2026-03-16|2026-03-19
+    后接详细信息块。
+    """
+    from datetime import date as date_type
+    import re
+
+    if not doubao_ipo_text:
+        return "▶️五、*今日招股（新股認購）*\n• 今日暫無新股認購"
+    if doubao_ipo_text.strip() == "今日無港股新股認購":
+        return "▶️五、*今日招股（新股認購）*\n• 今日暫無新股認購"
+
+    if today_date is None:
+        HKT = timezone(timedelta(hours=8))
+        today_date = datetime.now(HKT).date()
+
+    # 按 DATES: 行分割各 IPO 块
+    # 每个块的格式：DATES: ...\n...详细信息...
+    blocks = re.split(r'(?=^DATES:)', doubao_ipo_text, flags=re.MULTILINE)
+
+    first_day_blocks = []
+    ongoing_lines = []
+
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+
+        # 提取 DATES 行
+        dates_match = re.match(r'^DATES:\s*(.+)$', block, re.MULTILINE)
+        if not dates_match:
+            # 没有 DATES 行（豆包未遵守格式），按首日处理保留完整
+            first_day_blocks.append(block)
+            continue
+
+        dates_line = dates_match.group(1).strip()
+        parts = [p.strip() for p in dates_line.split("|")]
+
+        # 解析 code, name, sub_start, sub_end
+        code = parts[0].zfill(5) if len(parts) > 0 else ""
+        name = parts[1] if len(parts) > 1 else ""
+        sub_start_str = parts[2] if len(parts) > 2 else ""
+        sub_end_str = parts[3] if len(parts) > 3 else ""
+
+        # 去掉 DATES 行，保留后面的详细文本
+        detail_text = re.sub(r'^DATES:.*\n?', '', block, count=1, flags=re.MULTILINE).strip()
+
+        # 解析日期
+        sub_start = None
+        sub_end = None
+        try:
+            sub_start = date_type.fromisoformat(sub_start_str)
+        except ValueError:
+            pass
+        try:
+            sub_end = date_type.fromisoformat(sub_end_str)
+        except ValueError:
+            pass
+
+        is_first_day = (sub_start is not None and sub_start == today_date)
+
+        if is_first_day:
+            first_day_blocks.append(detail_text)
+        else:
+            # 续期：构造简短提醒
+            if sub_start and sub_end:
+                date_range = (f"{sub_start.month}月{sub_start.day}日"
+                              f"—{sub_end.month}月{sub_end.day}日")
+            else:
+                date_range = f"{sub_start_str}—{sub_end_str}"
+            display_code = code if code else ""
+            ongoing_lines.append(
+                f"{name}（{display_code}.HK）：{date_range}"
+            )
+
+    # 拼装最终输出
+    parts_out = ["▶️五、*今日招股（新股認購）*"]
+    if first_day_blocks:
+        parts_out.append("\n\n".join(first_day_blocks))
+    if ongoing_lines:
+        parts_out.append("正在招股：\n" + "\n".join(ongoing_lines))
+    if not first_day_blocks and not ongoing_lines:
+        parts_out.append("• 今日暫無新股認購")
+
+    return "\n\n".join(parts_out)
 
 
 # ─────────────────────────────────────────────

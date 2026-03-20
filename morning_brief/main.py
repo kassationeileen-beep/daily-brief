@@ -272,13 +272,50 @@ def main():
         sys.exit(1)
 
     # ── Step 1: 抓取市场数据 ──────────────────────────────────────────────────
-    logger.info("Step 1: 抓取市场数据")
+    logger.info("Step 1: 抓取市场数据（结构化 scraper）")
     try:
         from fetchers.market_data import fetch_all_market_data
         market_data = fetch_all_market_data()
     except Exception as e:
         logger.error(f"市场数据模块失败: {e}")
         market_data = {}
+
+    # ── Step 1b: 豆包补充资金动态（填补 scraper 缺失字段）─────────────────────
+    # 补充字段：HSI 成交额、北水净流向、A股总成交额
+    # 只在对应字段为空时补充，不覆盖 scraper 已获取的数据
+    doubao_market_available = bool(os.environ.get("ARK_API_KEY") and (
+        os.environ.get("DOUBAO_BOT_MARKET") or os.environ.get("DOUBAO_BOT_MACRO")
+    ))
+    if doubao_market_available:
+        logger.info("Step 1b: 豆包补充资金动态")
+        try:
+            from fetchers.doubao_macro import fetch_doubao_market_summary, parse_market_summary
+            raw_summary = fetch_doubao_market_summary(date_hkt=now_hkt)
+            if raw_summary:
+                db_market = parse_market_summary(raw_summary)
+                # 逐字段补充：只填 scraper 未获取到的
+                hsi = market_data.setdefault("hsi", {})
+                if hsi.get("close") is None and db_market["hsi"].get("close") is not None:
+                    hsi["close"] = db_market["hsi"]["close"]
+                    logger.info(f"  [DoubaoMarket] 补充 HSI close: {hsi['close']}")
+                if hsi.get("pct") is None and db_market["hsi"].get("pct") is not None:
+                    hsi["pct"] = db_market["hsi"]["pct"]
+                if hsi.get("turnover_hkd_100m") is None and db_market["hsi"].get("turnover_hkd_100m") is not None:
+                    hsi["turnover_hkd_100m"] = db_market["hsi"]["turnover_hkd_100m"]
+                    logger.info(f"  [DoubaoMarket] 补充 HSI 成交额: {hsi['turnover_hkd_100m']} 亿")
+
+                sb = market_data.setdefault("southbound", {})
+                if sb.get("net_flow_hkd_100m") is None and db_market["southbound"].get("net_flow_hkd_100m") is not None:
+                    sb["net_flow_hkd_100m"] = db_market["southbound"]["net_flow_hkd_100m"]
+                    sb["direction"] = db_market["southbound"]["direction"] or ""
+                    logger.info(f"  [DoubaoMarket] 补充北水: {sb['direction']} {sb['net_flow_hkd_100m']} 亿")
+
+                ash = market_data.setdefault("a_share", {})
+                if ash.get("total_turnover_trillion") is None and db_market["a_share"].get("total_turnover_trillion") is not None:
+                    ash["total_turnover_trillion"] = db_market["a_share"]["total_turnover_trillion"]
+                    logger.info(f"  [DoubaoMarket] 补充A股成交额: {ash['total_turnover_trillion']} 万亿")
+        except Exception as e:
+            logger.warning(f"豆包资金动态补充失败: {e}，使用 scraper 原始数据")
 
     # ── Step 2a: 豆包宏观（优先） ─────────────────────────────────────────────
     # 若配置了 ARK_API_KEY + DOUBAO_BOT_MACRO*，则用豆包直接生成宏观段落；
@@ -334,11 +371,11 @@ def main():
     if doubao_ipo_available:
         logger.info("Step 2b: 豆包 API 拉取今日招股信息")
         try:
-            from fetchers.doubao_macro import fetch_doubao_ipo, fmt_doubao_ipo_section
+            from fetchers.doubao_macro import fetch_doubao_ipo, fmt_doubao_ipo_section_smart
             doubao_ipo_text = fetch_doubao_ipo(date_hkt=now_hkt)
             if doubao_ipo_text:
-                ipo_section = fmt_doubao_ipo_section(doubao_ipo_text)
-                logger.info("[DoubaoIPO] 招股信息生成成功，跳过爬虫方案")
+                ipo_section = fmt_doubao_ipo_section_smart(doubao_ipo_text, today_date=now_hkt.date())
+                logger.info("[DoubaoIPO] 招股信息生成成功（首日完整/续期提醒），跳过爬虫方案")
             else:
                 logger.warning("[DoubaoIPO] 豆包 IPO 失败，降级到爬虫")
         except Exception as e:
