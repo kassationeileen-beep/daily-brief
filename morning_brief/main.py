@@ -297,7 +297,10 @@ def main():
             if raw_summary:
                 db_market = parse_market_summary(raw_summary)
                 # 逐字段补充：只填 scraper 未获取到的
-                hsi = market_data.setdefault("hsi", {})
+                # 注意：_safe 失败时返回 None，setdefault 对已存在的 None 值无效，
+                # 须用 "or {}" 确保始终有可操作的 dict
+                hsi = market_data.get("hsi") or {}
+                market_data["hsi"] = hsi
                 if hsi.get("close") is None and db_market["hsi"].get("close") is not None:
                     hsi["close"] = db_market["hsi"]["close"]
                     logger.info(f"  [DoubaoMarket] 补充 HSI close: {hsi['close']}")
@@ -307,13 +310,15 @@ def main():
                     hsi["turnover_hkd_100m"] = db_market["hsi"]["turnover_hkd_100m"]
                     logger.info(f"  [DoubaoMarket] 补充 HSI 成交额: {hsi['turnover_hkd_100m']} 亿")
 
-                sb = market_data.setdefault("southbound", {})
+                sb = market_data.get("southbound") or {}
+                market_data["southbound"] = sb
                 if sb.get("net_flow_hkd_100m") is None and db_market["southbound"].get("net_flow_hkd_100m") is not None:
                     sb["net_flow_hkd_100m"] = db_market["southbound"]["net_flow_hkd_100m"]
                     sb["direction"] = db_market["southbound"]["direction"] or ""
                     logger.info(f"  [DoubaoMarket] 补充北水: {sb['direction']} {sb['net_flow_hkd_100m']} 亿")
 
-                ash = market_data.setdefault("a_share", {})
+                ash = market_data.get("a_share") or {}
+                market_data["a_share"] = ash
                 if ash.get("total_turnover_trillion") is None and db_market["a_share"].get("total_turnover_trillion") is not None:
                     ash["total_turnover_trillion"] = db_market["a_share"]["total_turnover_trillion"]
                     logger.info(f"  [DoubaoMarket] 补充A股成交额: {ash['total_turnover_trillion']} 万亿")
