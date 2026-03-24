@@ -322,12 +322,8 @@ def fetch_all_stock_news(request_interval: float = 1.5) -> dict:
         if not news:
             logger.debug(f"[{code}] 主接口无数据，尝试备用")
             news = fetch_hk_news_alt(code, name)
-        # 回购公告前置（来自港交所披露，Yahoo RSS 通常不包含）
-        buyback = fetch_hk_buyback_announcements(code, name)
-        if buyback:
-            news = buyback + news
         result["hk"][code] = {"name": name, "news": news}
-        logger.debug(f"  {code} {name}: {len(news)} 条（含回购 {len(buyback)} 条）")
+        logger.debug(f"  {code} {name}: {len(news)} 条")
         time.sleep(request_interval)
 
     logger.info(f"抓取A股新闻（{len(A_STOCKS)} 只）...")
