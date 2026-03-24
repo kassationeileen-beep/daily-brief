@@ -76,6 +76,7 @@ def build_brief(
     macro_section: str = "",
     ipo_section: str = "",
     buyback_subsection: str = "",
+    earnings_subsection: str = "",
 ) -> str:
     date_str = now_hkt.strftime("%Y-%m-%d")           # 今日：用于标题
     date_compact = now_hkt.strftime("%Y%m%d")
@@ -158,12 +159,15 @@ WTI原油：{fxv("WTI", 2)}"""
         fx_block = "▶️二、*關鍵匯率*\n" + warn("匯率")
 
     # ── 第四部分：个股动态 ────────────────────────────────────────────────────
-    # 结构：回购子段落（如有）在前，个股新闻在后
+    # 结构：回购 → 业绩公告 → 个股新闻
     section4_parts = ["▶️四、*個股動態*"]
     if buyback_subsection:
         section4_parts.append(buyback_subsection)
+    if earnings_subsection:
+        section4_parts.append(earnings_subsection)
+    has_prefix = bool(buyback_subsection or earnings_subsection)
     if stock_sections:
-        if buyback_subsection:
+        if has_prefix:
             section4_parts.append("**個股新聞**")
         section4_parts.append("\n\n".join(stock_sections))
     else:
@@ -442,6 +446,28 @@ def main():
         except Exception as e:
             logger.error(f"豆包回购模块异常: {e}")
 
+    # ── Step 2e: 业绩公告日历（Finnhub → 豆包详情）────────────────────────────
+    # Finnhub 检查 watchlist 是否有过去 48h 内的业绩公告
+    # 若命中则用豆包搜索简要财务数据，插入第四部分
+    earnings_subsection = ""
+    finnhub_key = os.environ.get("FINNHUB_API_KEY")
+    if finnhub_key:
+        logger.info("Step 2e: Finnhub 业绩日历检查")
+        try:
+            from fetchers.earnings_fetcher import fetch_finnhub_earnings_watchlist
+            from fetchers.doubao_macro import fetch_doubao_earnings_detail, fmt_earnings_subsection
+            triggered = fetch_finnhub_earnings_watchlist(now_hkt, finnhub_key)
+            if triggered:
+                logger.info(f"[Earnings] Finnhub 触发 {len(triggered)} 只: {[s['name'] for s in triggered]}")
+                detail_text = fetch_doubao_earnings_detail(triggered, date_hkt=now_hkt)
+                earnings_subsection = fmt_earnings_subsection(detail_text or "")
+            else:
+                logger.info("[Earnings] watchlist 内今日无业绩公告（Finnhub）")
+        except Exception as e:
+            logger.error(f"业绩日历模块异常: {e}")
+    else:
+        logger.debug("Step 2e: 未配置 FINNHUB_API_KEY，跳过业绩日历")
+
     # ── Step 2d: 抓取个股新闻 ─────────────────────────────────────────────────
     logger.info("Step 2d: 抓取个股新闻")
     try:
@@ -467,6 +493,7 @@ def main():
         macro_section=macro_section,
         ipo_section=ipo_section,
         buyback_subsection=buyback_subsection,
+        earnings_subsection=earnings_subsection,
     )
 
     # ── Step 5: 保存到文件 ────────────────────────────────────────────────────
