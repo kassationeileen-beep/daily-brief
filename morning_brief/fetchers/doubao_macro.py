@@ -763,21 +763,39 @@ def fmt_buyback_subsection(matched_items: list[dict]) -> str:
 # ─────────────────────────────────────────────
 
 _SYSTEM_EARNINGS_DETAIL = """你是服务香港证券从业者的专业金融早报编辑。
-任務：搜索以下港股公司今日或昨日发布的业绩公告（年報/中報/盈利預警），每只股票输出简短要点。
+任務：搜索以下港股公司近日（過去48小時內）發布的業績公告，按三段式格式輸出要點。
 
-【輸出格式，每只股票一塊，中間空行分隔】
+【輸出格式，每只股票一塊，中間用「---」分隔】
 [公司名]（[代碼].HK）｜[業績期，如「2025年全年業績」]
-* 收入：[X.XX 億 港元/人民幣]（同比 [+/-X%]）
-* 淨利潤：[X.XX 億 港元/人民幣]（同比 [+/-X%]）
-* 末期息：[每股 X.XX 港元] 或 不派息（如有披露）
+
+▸ 財務數據
+• 收入：[X.XX 億 港元/人民幣]（同比 [+/-X%]）
+• 毛利率：[X.X%]（同比 [+/-X ppts]）（如有）
+• EBITDA/經營利潤：[X.XX 億]（同比 [+/-X%]）（如有）
+• 淨利潤：[X.XX 億 港元/人民幣]（同比 [+/-X%]）
+• 每股盈利（EPS）：[X.XX 港元/人民幣]（如有）
+
+▸ 業務更新
+• [核心業務板塊表現，1-3個要點，含具體數字]
+• [重要戰略/產品/市場動向]
+
+▸ 其他
+• 末期息/中期息：[每股 X.XX 港元] 或 不派息
+• 股息合計（全年）：[X.XX 港元]（如有）
+• 回購/特別派息：[如有則說明]
 
 【約束】
 - 使用繁體中文
-- 保留具體數字，無數字填 N/A
-- 若某只股票確實找不到今日/昨日業績公告，輸出：[公司名]（[代碼].HK）｜暫未找到業績公告
+- 數字必須來自公告原文，無數據填 N/A，不得估算
+- 若某只股票在過去48小時內確實找不到業績公告，輸出：
+  [公司名]（[代碼].HK）｜⚠️ 未找到近48小時業績公告
 - 不輸出任何說明性前言後語"""
 
-_USER_EARNINGS_DETAIL = "今天是{date}，以下港股公司今日或昨日發布了業績公告，請搜索並按格式輸出各公司業績要點：\n{companies}"
+_USER_EARNINGS_DETAIL = (
+    "今天是{date}（北京時間早上07:30），"
+    "以下港股公司近日發布了業績公告，"
+    "請搜索各公司官方業績公告原文並按格式輸出：\n{companies}"
+)
 
 
 def fetch_doubao_earnings_detail(
@@ -810,9 +828,10 @@ def fetch_doubao_earnings_detail(
     user_prompt = _USER_EARNINGS_DETAIL.format(date=date_str, companies=companies)
 
     try:
+        # 三段式格式，每只股票约 200 tokens，最多预估 5 只
         output = _call_doubao(
             _SYSTEM_EARNINGS_DETAIL, user_prompt, bot_id,
-            max_tokens=600,
+            max_tokens=1200,
         )
         logger.info(f"[DoubaoEarnings] 成功，{len(output)} 字，涉及 {len(triggered_stocks)} 只")
         return output
