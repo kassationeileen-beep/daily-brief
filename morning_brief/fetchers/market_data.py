@@ -137,6 +137,13 @@ def fetch_southbound_flow() -> dict:
     import akshare as ak
     result = {"net_flow_hkd_100m": None, "direction": None, "error": None}
 
+    def _normalize_sb(val: float, label: str) -> float:
+        """南向资金单位校验：正常范围 10–2000 亿港元/天，> 5000 视为万元自动换算"""
+        if abs(val) > 5000:
+            logger.warning(f"[{label}] 数值 {val:.2f} 异常大，疑为万元，÷10000 换算为亿元")
+            val = val / 10000
+        return val
+
     # 方法一：stock_hsgt_fund_min_em 分时数据（push2 实时推送端点，最可靠）
     # 列：日期, 时间, 港股通(沪), 港股通(深), 南向资金（累计净流入，亿元）
     # 2024-08-19 交易所更改披露机制后，此端点仍可正常访问
@@ -146,6 +153,7 @@ def fetch_southbound_flow() -> dict:
             row = df.iloc[-1]  # 取最新分钟（当日最新累计值）
             val = float(row["南向资金"])
             if val != 0:  # 0 可能是未开市，跳过
+                val = _normalize_sb(val, "Southbound-min")
                 result["net_flow_hkd_100m"] = abs(round(val, 2))
                 result["direction"] = "買入" if val >= 0 else "賣出"
                 logger.info(f"[Southbound-min] 南向净流入: {val:.2f} 亿元 ({row['日期']} {row['时间']})")
@@ -163,6 +171,7 @@ def fetch_southbound_flow() -> dict:
             south = df[df["板块"].str.contains("港股通|南向", na=False)]
             if not south.empty:
                 val = float(south["成交净买额"].sum())  # 已转换为亿元
+                val = _normalize_sb(val, "Southbound-v1")
                 result["net_flow_hkd_100m"] = abs(round(val, 2))
                 result["direction"] = "買入" if val >= 0 else "賣出"
                 logger.info(f"[Southbound-v1] 南向净买额: {val:.2f} 亿元")
@@ -176,6 +185,7 @@ def fetch_southbound_flow() -> dict:
         if df is not None and not df.empty:
             row = df.iloc[-1]  # 已按日期升序排列
             val = float(row["当日成交净买额"])  # 单位亿元
+            val = _normalize_sb(val, "Southbound-v2")
             result["net_flow_hkd_100m"] = abs(round(val, 2))
             result["direction"] = "買入" if val >= 0 else "賣出"
             logger.info(f"[Southbound-v2] 南向净买额: {val:.2f} 亿元 (日期: {row['日期']})")

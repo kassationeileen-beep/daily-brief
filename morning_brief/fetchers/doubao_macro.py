@@ -433,6 +433,23 @@ def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
         HKT = timezone(timedelta(hours=8))
         today_date = datetime.now(HKT).date()
 
+    def _parse_date(s: str):
+        """容错日期解析：用正则提取 YYYY-MM-DD，忽略豆包附加的括注或格式噪声"""
+        s = s.strip()
+        m = re.search(r'(\d{4}-\d{2}-\d{2})', s)
+        if m:
+            try:
+                return date_type.fromisoformat(m.group(1))
+            except ValueError:
+                pass
+        m2 = re.search(r'(\d{4})[/.](\d{1,2})[/.](\d{1,2})', s)
+        if m2:
+            try:
+                return date_type(int(m2.group(1)), int(m2.group(2)), int(m2.group(3)))
+            except ValueError:
+                pass
+        return None
+
     # 按 DATES: 行分割各 IPO 块
     # 每个块的格式：DATES: ...\n...详细信息...
     blocks = re.split(r'(?=^DATES:)', doubao_ipo_text, flags=re.MULTILINE)
@@ -445,7 +462,7 @@ def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
         if not block:
             continue
 
-        # 提取 DATES 行
+        # 提取 DATES 行（兼容全角竖线｜和半角|）
         dates_match = re.match(r'^DATES:\s*(.+)$', block, re.MULTILINE)
         if not dates_match:
             # 没有 DATES 行（豆包未遵守格式），按首日处理保留完整
@@ -453,6 +470,8 @@ def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
             continue
 
         dates_line = dates_match.group(1).strip()
+        # 统一全角竖线为半角
+        dates_line = dates_line.replace('｜', '|')
         parts = [p.strip() for p in dates_line.split("|")]
 
         # 解析 code, name, sub_start, sub_end
@@ -464,17 +483,9 @@ def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
         # 去掉 DATES 行，保留后面的详细文本
         detail_text = re.sub(r'^DATES:.*\n?', '', block, count=1, flags=re.MULTILINE).strip()
 
-        # 解析日期
-        sub_start = None
-        sub_end = None
-        try:
-            sub_start = date_type.fromisoformat(sub_start_str)
-        except ValueError:
-            pass
-        try:
-            sub_end = date_type.fromisoformat(sub_end_str)
-        except ValueError:
-            pass
+        # 容错日期解析
+        sub_start = _parse_date(sub_start_str)
+        sub_end = _parse_date(sub_end_str)
 
         is_first_day = (sub_start is not None and sub_start == today_date)
 
