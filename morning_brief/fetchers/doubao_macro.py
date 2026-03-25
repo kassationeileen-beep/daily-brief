@@ -241,6 +241,8 @@ def _call_doubao(
         "temperature": temperature,
     }
 
+    logger.info(f"[Doubao] endpoint={endpoint} model_prefix={model_id[:12]}... max_tokens={max_tokens} payload_keys={list(payload.keys())}")
+
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(endpoint, json=payload, headers=headers)
         if not resp.is_success:
