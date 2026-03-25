@@ -231,22 +231,15 @@ def _call_doubao(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    is_bot = model_id.startswith("bot-")
-    if is_bot:
-        # bot 端点不支持 system role / max_tokens / temperature 等额外参数；
-        # 将 system 指令并入 user 消息
-        messages = [{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
-        payload = {"model": model_id, "messages": messages}
-    else:
-        payload = {
-            "model": model_id,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
+    payload = {
+        "model": model_id,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
 
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(endpoint, json=payload, headers=headers)
