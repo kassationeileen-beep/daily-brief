@@ -121,27 +121,27 @@ _SYSTEM_IPO = """你是服务香港证券从业者的专业金融早报编辑。
 
 任务：搜索今日（认购期包含今日）的港股新股认购（IPO申购）信息。
 
-【输出格式，严格遵守——每只新股必须先输出一行 DATES 元数据，再输出详细信息】
+【输出格式，严格遵守——每只新股先输出一行 DATES 元数据行，再输出详细信息块】
 
-格式如下（每只新股一块，中间空行分隔）：
-DATES: [股票代碼（4-5位）]|[公司名]|[認購開始日YYYY-MM-DD]|[認購截止日YYYY-MM-DD]
-📅 [公司名]（[股票代碼].HK）
-公司介紹：[業務定位、核心優勢、市場地位，1-2句]
-財務數據：[最近完整財年營收、淨利潤、毛利率；若有最新季度/半年數據也列出，並標明同比趨勢]
-• 招股期：[開始日期]—[截止日期]
-• 全球發售：[發售股數及港股/國際配比]
-• 發行價：定價[X]港元/股，每手[X]股
-• 基石投資：[基石投資者名稱]，認購金額：[金額]（如有）
-• 獨家保薦：[保薦人]
-• 定價日：[日期]；上市日：[日期]
-• 募資用途：[主要用途，1句]
+DATES 行示例（用真实数据填入，不得加中括号或任何占位符）：
+DATES: 02729|凱樂士科技|2026-03-16|2026-03-20
+📅 凱樂士科技（02729.HK）
+公司介紹：xxxxxx
+財務數據：xxxxxx
+• 招股期：2026-03-16—2026-03-20
+• 全球發售：xxxxxx
+• 發行價：定價X港元/股，每手X股
+• 基石投資：xxxxxx（如有）
+• 獨家保薦：xxxxxx
+• 定價日：xxxx；上市日：xxxx
+• 募資用途：xxxxxx
 
-【若今日無新股認購，輸出：今日無港股新股認購】
-【約束】
-- DATES 行必須在每只股票信息的最前面
-- DATES 行的日期格式必須為 YYYY-MM-DD（如 2026-03-20）
-- 使用繁體中文
-- 數字保留具體值
+【重要約束】
+- DATES 行的四個字段必須全部為真實搜索到的數值，日期格式 YYYY-MM-DD
+- 嚴禁在任何字段中使用 [待查]、[未知]、[TBD] 等佔位符——寧可整只股票不輸出，也不輸出不確定數據
+- 若某只股票找不到股票代碼或確切招股日期，直接跳過該股票
+- 使用繁體中文；數字保留具體值
+- 若今日無新股認購，輸出：今日無港股新股認購
 - 不輸出解釋性前言後語"""
 
 _USER_IPO = "今天是{date}，請搜索今日（{month}月{day}日）仍在認購期的港股新股（IPO申購）信息，按格式輸出（每只股票先輸出 DATES 行）。請確保搜索全面，不要遺漏任何今日有效認購期的新股，包括首日招股和續期招股。"
@@ -493,11 +493,18 @@ def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
             first_day_blocks.append(detail_text)
         else:
             # 续期：构造简短提醒
+            # 防御：跳过豆包用占位符填充的无效条目
+            if "[" in code or "[" in name or not name.strip():
+                logger.debug(f"[IPO-fmt] 跳过占位符条目: code={code!r} name={name!r}")
+                continue
             if sub_start and sub_end:
                 date_range = (f"{sub_start.month}月{sub_start.day}日"
                               f"—{sub_end.month}月{sub_end.day}日")
-            else:
+            elif "[" not in sub_start_str and "[" not in sub_end_str and (sub_start_str or sub_end_str):
                 date_range = f"{sub_start_str}—{sub_end_str}"
+            else:
+                logger.debug(f"[IPO-fmt] 跳过日期缺失条目: {name} start={sub_start_str!r} end={sub_end_str!r}")
+                continue
             display_code = code if code else ""
             ongoing_lines.append(
                 f"{name}（{display_code}.HK）：{date_range}"
