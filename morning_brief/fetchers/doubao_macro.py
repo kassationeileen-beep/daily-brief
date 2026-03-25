@@ -151,7 +151,7 @@ _USER_IPO = (
     "請在每個 DATES 行後補充詳細信息，DATES 行保持原樣不修改。"
 )
 
-# 獨立搜索模式：爬蟲無數據時，豆包自行搜索（不輸出 DATES 行）
+# 獨立搜索模式：爬蟲無數據時，豆包自行搜索（必須輸出 DATES 行以支持首日/續期判斷）
 _SYSTEM_IPO_SEARCH = f"""你是服务香港证券从业者的专业金融早报编辑。
 每日早报发布时间：北京时间 07:30。
 
@@ -161,18 +161,19 @@ _SYSTEM_IPO_SEARCH = f"""你是服务香港证券从业者的专业金融早报�
 1. 先搜索今日港股认购新股名单（包含首日及续期认购）
 2. 对每只找到的新股，进一步搜索其招股书摘要、HKEX公告、港交所披露易及财经媒体（信报、经济日报、阿思达克），获取公司介绍、财务数据、发行价、每手股数、保荐人等详细信息
 
-【每只股票输出格式（每块之间空行分隔）】
+【每只股票输出格式（每块之间空行分隔，DATES 行必须在每块最前面）】
+DATES: 股票代碼（5位含前導零）|公司名稱|認購起始日（YYYY-MM-DD）|認購截止日（YYYY-MM-DD）
 {_DETAIL_BLOCK_FORMAT}
 
 【約束】
-- 每只股票輸出一個完整信息塊，不輸出任何 DATES 行
+- 每只股票必須以 DATES: 行開頭，格式嚴格為「DATES: 代碼|名稱|起始日|截止日」，日期格式 YYYY-MM-DD
 - 必須搜尋每只股票的招股說明書或HKEX公告以填寫詳細字段，禁止不搜尋就填 N/A
 - 若搜尋後確實找不到某字段，才填 N/A；嚴禁使用 [待查]、[TBD] 等占位符
 - 若今日確實無新股認購，輸出：今日無港股新股認購
 - 使用繁體中文；數字保留具體值
 - 不輸出解釋性前言後語"""
 
-_USER_IPO_SEARCH = "今天是{date}（北京時間07:30），請搜索今日（{month}月{day}日）仍在認購期的港股新股，按格式輸出。包括首日招股和續期招股，請搜索全面，並對每只股票查詢招股書及HKEX公告以獲取完整資料。"
+_USER_IPO_SEARCH = "今天是{date}（北京時間07:30），請搜索今日（{month}月{day}日）仍在認購期的港股新股，按格式輸出（每只股票必須以 DATES: 行開頭）。包括首日招股和續期招股，請搜索全面，並對每只股票查詢招股書及HKEX公告以獲取完整資料。"
 
 # ── 资金动态 ──────────────────────────────────
 # cron 在 07:30 运行，港股/A股尚未开市，需查询最近一个交易日数据
@@ -352,7 +353,7 @@ def fetch_doubao_ipo(
         user_prompt   = _USER_IPO.format(date=date_str, dates_block=dates_block)
         logger.info(f"[DoubaoIPO] 丰富模式，{len(ipo_list)} 只")
     else:
-        # ── 独立搜索模式：豆包自行搜索，不要求 DATES 行 ──
+        # ── 独立搜索模式：豆包自行搜索，要求输出 DATES 行（首日/续期判断依赖此）──
         month = str(date_hkt.month)
         day   = str(date_hkt.day)
         system_prompt = _SYSTEM_IPO_SEARCH
@@ -852,14 +853,14 @@ _SYSTEM_EARNINGS_WATCHLIST = f"""你是服务香港证券从业者的专业金�
 {_EARNINGS_OUTPUT_FORMAT}
 
 【約束】
-- 只輸出過去24小時內確實有業績公告的公司，沒有業績的公司一律跳過（不輸出任何行）
+- 只輸出過去48小時內確實有業績公告的公司，沒有業績的公司一律跳過（不輸出任何行）
 - 數字必須來自公告原文，無數據填 N/A，不得估算
-- 若 watchlist 中所有公司均無近24小時業績，輸出：近24小時watchlist內無業績公告
+- 若 watchlist 中所有公司均無近48小時業績，輸出：近48小時watchlist內無業績公告
 - 使用繁體中文；不輸出解釋性前言後語"""
 
 _USER_EARNINGS_WATCHLIST = (
     "今天是{date}（北京時間07:30）。請從以下港股 watchlist 中，"
-    "搜索過去24小時內（{prev_date} 07:30 至今）發布業績公告的公司，按格式輸出：\n\n"
+    "搜索過去48小時內（{prev_date} 07:30 至今）發布業績公告的公司，按格式輸出：\n\n"
     "{watchlist}"
 )
 
@@ -906,7 +907,7 @@ def fetch_doubao_earnings_watchlist(
         date_hkt = datetime.now(HKT)
 
     date_str     = date_hkt.strftime("%Y年%m月%d日")
-    prev_date_str = (date_hkt - timedelta(days=1)).strftime("%Y年%m月%d日")
+    prev_date_str = (date_hkt - timedelta(days=2)).strftime("%Y年%m月%d日")
     watchlist_str = "\n".join(
         f"- {name}（{code.zfill(4)}.HK）"
         for code, name in watchlist.items()
@@ -924,8 +925,8 @@ def fetch_doubao_earnings_watchlist(
             max_tokens=2500,
         )
         # 无业绩时返回约定短语，视为 None
-        if "無業績公告" in output or "无业绩" in output:
-            logger.info("[DoubaoEarnings-WL] watchlist 内近24h无业绩")
+        if "無業績公告" in output or "无业绩" in output or "近48小時" in output:
+            logger.info("[DoubaoEarnings-WL] watchlist 内近48h无业绩")
             return None
         logger.info(f"[DoubaoEarnings-WL] 成功，{len(output)} 字")
         return output
