@@ -116,35 +116,59 @@ _USER_MACRO_GLOBAL = "今天是{date}，現在是北京時間07:30，請搜索�
 
 # ── 港股今日招股 ─────────────────────────────
 # Python 根据 DATES 元数据行判断首日/续期，分别格式化
-_SYSTEM_IPO = """你是服务香港证券从业者的专业金融早报编辑。
+_DETAIL_BLOCK_FORMAT = """\
+📅 公司名（代碼.HK）
+公司介紹：業務定位、核心優勢、市場地位（1-2句）
+財務數據：最近完整財年營收、淨利潤、毛利率（如有最新季度/半年數據也列出）
+• 招股期：起始日—截止日
+• 全球發售：發售股數及港股/國際配比
+• 發行價：定價X港元/股，每手X股
+• 基石投資：投資者名稱及認購金額（有則填，無則省略此行）
+• 獨家保薦：保薦人
+• 定價日：xxxx；上市日：xxxx
+• 募資用途：主要用途（1句）"""
+
+# 豐富模式：DATES 行由系統提供，豆包只補充詳細信息
+_SYSTEM_IPO = f"""你是服务香港证券从业者的专业金融早报编辑。
+每日早报发布时间：北京时间 07:30。
+
+任务：以下港股新股的代号和招股日期已由系统确认（DATES 行已提供），
+请在每个 DATES 行后面补充详细信息。
+
+【每只股票输出格式（DATES 行原样保留，不得修改）】
+DATES: 02729|凱樂士科技|2026-03-16|2026-03-20
+{_DETAIL_BLOCK_FORMAT}
+
+【約束】
+- DATES 行必須保持原樣，不得修改代碼或日期
+- 找不到的字段填 N/A，嚴禁使用任何中括號占位符
+- 使用繁體中文；數字保留具體值
+- 不輸出解釋性前言後語"""
+
+_USER_IPO = (
+    "今天是{date}（北京時間07:30）。以下港股今日在認購期內（代號和日期已由系統確認）：\n\n"
+    "{dates_block}\n\n"
+    "請在每個 DATES 行後補充詳細信息，DATES 行保持原樣不修改。"
+)
+
+# 獨立搜索模式：爬蟲無數據時，豆包自行搜索（不輸出 DATES 行）
+_SYSTEM_IPO_SEARCH = f"""你是服务香港证券从业者的专业金融早报编辑。
 每日早报发布时间：北京时间 07:30。
 
 任务：搜索今日（认购期包含今日）的港股新股认购（IPO申购）信息。
+请搜索 HKEX 官方公告、IPO 招股书及各大財经媒体获取准确数据。
 
-【输出格式，严格遵守——每只新股先输出一行 DATES 元数据行，再输出详细信息块】
+【每只股票输出格式（每块之间空行分隔）】
+{_DETAIL_BLOCK_FORMAT}
 
-DATES 行示例（用真实数据填入，不得加中括号或任何占位符）：
-DATES: 02729|凱樂士科技|2026-03-16|2026-03-20
-📅 凱樂士科技（02729.HK）
-公司介紹：xxxxxx
-財務數據：xxxxxx
-• 招股期：2026-03-16—2026-03-20
-• 全球發售：xxxxxx
-• 發行價：定價X港元/股，每手X股
-• 基石投資：xxxxxx（如有）
-• 獨家保薦：xxxxxx
-• 定價日：xxxx；上市日：xxxx
-• 募資用途：xxxxxx
-
-【重要約束】
-- DATES 行的四個字段必須全部為真實搜索到的數值，日期格式 YYYY-MM-DD
-- 嚴禁在任何字段中使用 [待查]、[未知]、[TBD] 等佔位符——寧可整只股票不輸出，也不輸出不確定數據
-- 若某只股票找不到股票代碼或確切招股日期，直接跳過該股票
+【約束】
+- 每只股票輸出一個完整信息塊，不輸出任何 DATES 行
+- 找不到的字段填 N/A，嚴禁使用 [待查]、[TBD] 等任何中括號占位符
+- 若今日確實無新股認購，輸出：今日無港股新股認購
 - 使用繁體中文；數字保留具體值
-- 若今日無新股認購，輸出：今日無港股新股認購
 - 不輸出解釋性前言後語"""
 
-_USER_IPO = "今天是{date}，請搜索今日（{month}月{day}日）仍在認購期的港股新股（IPO申購）信息，按格式輸出（每只股票先輸出 DATES 行）。請確保搜索全面，不要遺漏任何今日有效認購期的新股，包括首日招股和續期招股。"
+_USER_IPO_SEARCH = "今天是{date}（北京時間07:30），請搜索今日（{month}月{day}日）仍在認購期的港股新股，按格式輸出。包括首日招股和續期招股，請搜索全面。"
 
 # ── 资金动态 ──────────────────────────────────
 # cron 在 07:30 运行，港股/A股尚未开市，需查询最近一个交易日数据
@@ -284,10 +308,16 @@ def fetch_doubao_macro_global(date_hkt: datetime = None) -> Optional[str]:
         return None
 
 
-def fetch_doubao_ipo(date_hkt: datetime = None) -> Optional[str]:
+def fetch_doubao_ipo(
+    ipo_list: list[dict] = None,
+    date_hkt: datetime = None,
+) -> Optional[str]:
     """
-    用豆包 API 获取今日港股新股认购详细信息。
-    返回格式化文本（含公司介绍/财务数据/招股细节），或 None（失败时）。
+    用豆包 API 获取/丰富港股新股认购信息。
+
+    ipo_list 非空 → 丰富模式：DATES 行由爬虫数据预填，豆包只补内容
+    ipo_list 为空/None → 独立搜索模式：豆包自行搜索，不输出 DATES 行
+    返回格式化文本，或 None（失败时）。
     """
     bot_id = _get_bot_id("DOUBAO_BOT_IPO")
     if not bot_id:
@@ -299,12 +329,27 @@ def fetch_doubao_ipo(date_hkt: datetime = None) -> Optional[str]:
         date_hkt = datetime.now(HKT)
 
     date_str = date_hkt.strftime("%Y年%m月%d日")
-    month = str(date_hkt.month)
-    day = str(date_hkt.day)
 
-    # system prompt 中的 {month}/{day} 占位符（用于标题格式）
-    system_prompt = _SYSTEM_IPO.replace("{month}", month).replace("{day}", day)
-    user_prompt = _USER_IPO.format(date=date_str, month=month, day=day)
+    if ipo_list:
+        # ── 丰富模式：DATES 行由爬虫提供，代码和日期不依赖豆包 ──
+        dates_lines = []
+        for s in ipo_list:
+            code  = s.get("code", "").zfill(5)
+            name  = s.get("name", "")
+            start = s.get("sub_start", "")
+            end   = s.get("sub_end", "")
+            dates_lines.append(f"DATES: {code}|{name}|{start}|{end}")
+        dates_block = "\n".join(dates_lines)
+        system_prompt = _SYSTEM_IPO
+        user_prompt   = _USER_IPO.format(date=date_str, dates_block=dates_block)
+        logger.info(f"[DoubaoIPO] 丰富模式，{len(ipo_list)} 只")
+    else:
+        # ── 独立搜索模式：豆包自行搜索，不要求 DATES 行 ──
+        month = str(date_hkt.month)
+        day   = str(date_hkt.day)
+        system_prompt = _SYSTEM_IPO_SEARCH
+        user_prompt   = _USER_IPO_SEARCH.format(date=date_str, month=month, day=day)
+        logger.info("[DoubaoIPO] 独立搜索模式（爬虫无数据）")
 
     try:
         output = _call_doubao(system_prompt, user_prompt, bot_id, max_tokens=2000)
@@ -766,36 +811,61 @@ def fmt_buyback_subsection(matched_items: list[dict]) -> str:
 
 
 # ─────────────────────────────────────────────
-# 业绩公告详情查询
+# 业绩公告查询（watchlist 模式 + 详情模式）
 # ─────────────────────────────────────────────
 
-_SYSTEM_EARNINGS_DETAIL = """你是服务香港证券从业者的专业金融早报编辑。
+_EARNINGS_OUTPUT_FORMAT = """\
+公司名（代碼.HK）｜業績期（如「2025年全年業績」）
+
+▸ 財務數據
+• 收入：X.XX 億 港元/人民幣（同比 +/-X%）
+• 毛利率：X.X%（同比 +/-X ppts）（如有）
+• EBITDA/經營利潤：X.XX 億（同比 +/-X%）（如有）
+• 淨利潤：X.XX 億 港元/人民幣（同比 +/-X%）
+• 每股盈利（EPS）：X.XX 港元/人民幣（如有）
+
+▸ 業務更新
+• 核心業務板塊表現（1-3個要點，含具體數字）
+• 重要戰略/產品/市場動向
+
+▸ 其他
+• 末期息/中期息：每股 X.XX 港元 或 不派息
+• 股息合計（全年）：X.XX 港元（如有）
+• 回購/特別派息：如有則說明"""
+
+# ── watchlist 模式：豆包自行判断哪些有业绩 ──────────────────
+_SYSTEM_EARNINGS_WATCHLIST = f"""你是服务香港证券从业者的专业金融早报编辑。
+每日早报发布时间：北京时间 07:30（过去48小时 = 前日07:30至今）。
+
+任务：从以下港股 watchlist 中，搜索过去48小时内发布了业绩公告（年報、中報、盈利預警）的公司，
+仅对有实际业绩发布的公司输出三段式要点。
+
+【輸出格式，每只股票一塊，中間用「---」分隔】
+{_EARNINGS_OUTPUT_FORMAT}
+
+【約束】
+- 只輸出過去48小時內確實有業績公告的公司，沒有業績的公司一律跳過（不輸出任何行）
+- 數字必須來自公告原文，無數據填 N/A，不得估算
+- 若 watchlist 中所有公司均無近48小時業績，輸出：近48小時watchlist內無業績公告
+- 使用繁體中文；不輸出解釋性前言後語"""
+
+_USER_EARNINGS_WATCHLIST = (
+    "今天是{date}（北京時間07:30）。請從以下港股 watchlist 中，"
+    "搜索過去48小時內（{prev_date} 07:30 至今）發布業績公告的公司，按格式輸出：\n\n"
+    "{watchlist}"
+)
+
+# ── 详情模式（Finnhub 触发备用）──────────────────────────────
+_SYSTEM_EARNINGS_DETAIL = f"""你是服务香港证券从业者的专业金融早报编辑。
 任務：搜索以下港股公司近日（過去48小時內）發布的業績公告，按三段式格式輸出要點。
 
 【輸出格式，每只股票一塊，中間用「---」分隔】
-[公司名]（[代碼].HK）｜[業績期，如「2025年全年業績」]
-
-▸ 財務數據
-• 收入：[X.XX 億 港元/人民幣]（同比 [+/-X%]）
-• 毛利率：[X.X%]（同比 [+/-X ppts]）（如有）
-• EBITDA/經營利潤：[X.XX 億]（同比 [+/-X%]）（如有）
-• 淨利潤：[X.XX 億 港元/人民幣]（同比 [+/-X%]）
-• 每股盈利（EPS）：[X.XX 港元/人民幣]（如有）
-
-▸ 業務更新
-• [核心業務板塊表現，1-3個要點，含具體數字]
-• [重要戰略/產品/市場動向]
-
-▸ 其他
-• 末期息/中期息：[每股 X.XX 港元] 或 不派息
-• 股息合計（全年）：[X.XX 港元]（如有）
-• 回購/特別派息：[如有則說明]
+{_EARNINGS_OUTPUT_FORMAT}
 
 【約束】
 - 使用繁體中文
 - 數字必須來自公告原文，無數據填 N/A，不得估算
-- 若某只股票在過去48小時內確實找不到業績公告，輸出：
-  [公司名]（[代碼].HK）｜⚠️ 未找到近48小時業績公告
+- 若某只股票確實無近48小時業績公告，跳過該股票不輸出
 - 不輸出任何說明性前言後語"""
 
 _USER_EARNINGS_DETAIL = (
@@ -805,12 +875,63 @@ _USER_EARNINGS_DETAIL = (
 )
 
 
+def fetch_doubao_earnings_watchlist(
+    watchlist: dict,
+    date_hkt: datetime = None,
+) -> Optional[str]:
+    """
+    将完整 watchlist 喂给豆包，让其自行判断哪些股票过去48h有业绩并生成三段式要点。
+
+    watchlist: {code: name} 字典（来自 HK_STOCKS）
+    返回格式化文本，或 None（失败/无业绩时）。
+    """
+    if not watchlist:
+        return None
+
+    bot_id = _get_bot_id("DOUBAO_BOT_EARNINGS", fallback_env="DOUBAO_BOT_MACRO")
+    if not bot_id:
+        logger.debug("[DoubaoEarnings] 未配置 Bot ID，跳过")
+        return None
+
+    if date_hkt is None:
+        HKT = timezone(timedelta(hours=8))
+        date_hkt = datetime.now(HKT)
+
+    date_str     = date_hkt.strftime("%Y年%m月%d日")
+    prev_date_str = (date_hkt - timedelta(days=1)).strftime("%Y年%m月%d日")
+    watchlist_str = "\n".join(
+        f"- {name}（{code.zfill(4)}.HK）"
+        for code, name in watchlist.items()
+    )
+    user_prompt = _USER_EARNINGS_WATCHLIST.format(
+        date=date_str,
+        prev_date=prev_date_str,
+        watchlist=watchlist_str,
+    )
+
+    try:
+        # watchlist ~46 只，有业绩的通常 3-10 只，每只约 250 tokens
+        output = _call_doubao(
+            _SYSTEM_EARNINGS_WATCHLIST, user_prompt, bot_id,
+            max_tokens=2500,
+        )
+        # 无业绩时返回约定短语，视为 None
+        if "無業績公告" in output or "无业绩" in output:
+            logger.info("[DoubaoEarnings-WL] watchlist 内近48h无业绩")
+            return None
+        logger.info(f"[DoubaoEarnings-WL] 成功，{len(output)} 字")
+        return output
+    except Exception as e:
+        logger.warning(f"[DoubaoEarnings-WL] 调用失败: {e}")
+        return None
+
+
 def fetch_doubao_earnings_detail(
     triggered_stocks: list[dict],
     date_hkt: datetime = None,
 ) -> Optional[str]:
     """
-    对 Finnhub 触发的 watchlist 股票，用豆包搜索业绩详情。
+    对指定股票列表（Finnhub 触发）用豆包搜索业绩详情（备用路径）。
 
     triggered_stocks: [{"code": "0291", "name": "華潤啤酒", ...}, ...]
     返回格式化文本，或 None（失败时）。
@@ -835,10 +956,9 @@ def fetch_doubao_earnings_detail(
     user_prompt = _USER_EARNINGS_DETAIL.format(date=date_str, companies=companies)
 
     try:
-        # 三段式格式，每只股票约 200 tokens，最多预估 5 只
         output = _call_doubao(
             _SYSTEM_EARNINGS_DETAIL, user_prompt, bot_id,
-            max_tokens=1200,
+            max_tokens=1500,
         )
         logger.info(f"[DoubaoEarnings] 成功，{len(output)} 字，涉及 {len(triggered_stocks)} 只")
         return output

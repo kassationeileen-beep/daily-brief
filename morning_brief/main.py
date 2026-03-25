@@ -380,28 +380,44 @@ def main():
         os.environ.get("DOUBAO_BOT_IPO") or os.environ.get("DOUBAO_BOT_MACRO")
     ))
 
+    # Step 2b: 招股信息
+    # 流程：先尝试爬虫（提供结构化代码+日期）→ 豆包丰富内容
+    #        爬虫无数据 → 豆包独立搜索（不输出 DATES 行，避免 [待查]）
+    #        豆包也不可用 → 爬虫简版兜底
+    logger.info("Step 2b: 抓取今日招股基础数据（爬虫）")
+    ipo_list_scraped: list[dict] = []
+    try:
+        from fetchers.ipo_fetcher import fetch_hk_ipo_today, fmt_ipo_section
+        ipo_list_scraped = fetch_hk_ipo_today(today=now_hkt.date())
+    except Exception as e:
+        logger.warning(f"今日招股爬虫失败: {e}")
+
     if doubao_ipo_available:
-        logger.info("Step 2b: 豆包 API 拉取今日招股信息")
+        # ipo_list_scraped 有数据→丰富模式；无数据→独立搜索模式（两者都传给同一函数）
+        logger.info(
+            f"Step 2b: 豆包{'丰富 ' + str(len(ipo_list_scraped)) + ' 只' if ipo_list_scraped else '独立搜索'}招股信息"
+        )
         try:
             from fetchers.doubao_macro import fetch_doubao_ipo, fmt_doubao_ipo_section_smart
-            doubao_ipo_text = fetch_doubao_ipo(date_hkt=now_hkt)
+            doubao_ipo_text = fetch_doubao_ipo(
+                ipo_list=ipo_list_scraped or None,   # None→独立搜索；有数据→丰富模式
+                date_hkt=now_hkt,
+            )
             if doubao_ipo_text:
                 ipo_section = fmt_doubao_ipo_section_smart(doubao_ipo_text, today_date=now_hkt.date())
-                logger.info("[DoubaoIPO] 招股信息生成成功（首日完整/续期提醒），跳过爬虫方案")
+                logger.info("[DoubaoIPO] 招股信息生成成功")
             else:
-                logger.warning("[DoubaoIPO] 豆包 IPO 失败，降级到爬虫")
+                logger.warning("[DoubaoIPO] 豆包返回空，降级")
         except Exception as e:
-            logger.error(f"豆包招股模块异常: {e}，降级到爬虫")
+            logger.error(f"豆包招股模块异常: {e}")
 
     if ipo_section is None:
-        logger.info("Step 2b (降级): 爬虫抓取今日招股")
-        try:
-            from fetchers.ipo_fetcher import fetch_hk_ipo_today, fmt_ipo_section
-            ipo_list = fetch_hk_ipo_today(today=now_hkt.date())
-            ipo_section = fmt_ipo_section(ipo_list)
-        except Exception as e:
-            logger.error(f"今日招股抓取失败: {e}")
-            ipo_section = "▶️五、*今日招股（新股認購）*\n• ⚠️ 數據獲取失敗，請手動補充"
+        # 兜底：爬虫简版（无详细介绍）或错误提示
+        ipo_section = (
+            fmt_ipo_section(ipo_list_scraped)
+            if ipo_list_scraped
+            else "▶️五、*今日招股（新股認購）*\n• ⚠️ 數據獲取失敗，請手動補充"
+        )
 
     # ── Step 2c: 豆包回购查询 ─────────────────────────────────────────────────
     # 豆包搜索全港 24h 回购 → Python 匹配 watchlist → 格式化子段落
@@ -446,27 +462,41 @@ def main():
         except Exception as e:
             logger.error(f"豆包回购模块异常: {e}")
 
-    # ── Step 2e: 业绩公告日历（Finnhub → 豆包详情）────────────────────────────
-    # Finnhub 检查 watchlist 是否有过去 48h 内的业绩公告
-    # 若命中则用豆包搜索简要财务数据，插入第四部分
+    # ── Step 2e: 业绩公告（豆包 watchlist 模式，Finnhub 辅助去重）─────────────
+    # 主路径：直接将完整 watchlist 喂给豆包，让其自行判断哪些有近48h业绩
+    # 辅助：若有 Finnhub API key，额外触发一次以补充豆包可能遗漏的股票
     earnings_subsection = ""
-    finnhub_key = os.environ.get("FINNHUB_API_KEY")
-    if finnhub_key:
-        logger.info("Step 2e: Finnhub 业绩日历检查")
+    doubao_earnings_available = bool(os.environ.get("ARK_API_KEY") and (
+        os.environ.get("DOUBAO_BOT_EARNINGS") or os.environ.get("DOUBAO_BOT_MACRO")
+    ))
+
+    if doubao_earnings_available:
+        logger.info("Step 2e: 豆包业绩查询（watchlist 模式）")
         try:
-            from fetchers.earnings_fetcher import fetch_finnhub_earnings_watchlist
-            from fetchers.doubao_macro import fetch_doubao_earnings_detail, fmt_earnings_subsection
-            triggered = fetch_finnhub_earnings_watchlist(now_hkt, finnhub_key)
-            if triggered:
-                logger.info(f"[Earnings] Finnhub 触发 {len(triggered)} 只: {[s['name'] for s in triggered]}")
-                detail_text = fetch_doubao_earnings_detail(triggered, date_hkt=now_hkt)
-                earnings_subsection = fmt_earnings_subsection(detail_text or "")
-            else:
-                logger.info("[Earnings] watchlist 内今日无业绩公告（Finnhub）")
+            from fetchers.doubao_macro import fetch_doubao_earnings_watchlist, fmt_earnings_subsection
+            from fetchers.stock_news import HK_STOCKS
+            earnings_text = fetch_doubao_earnings_watchlist(HK_STOCKS, date_hkt=now_hkt)
+            earnings_subsection = fmt_earnings_subsection(earnings_text or "")
         except Exception as e:
-            logger.error(f"业绩日历模块异常: {e}")
-    else:
-        logger.debug("Step 2e: 未配置 FINNHUB_API_KEY，跳过业绩日历")
+            logger.error(f"豆包业绩 watchlist 模块异常: {e}")
+
+    # Finnhub 辅助（可选）：若配置了 key 且豆包业绩段为空，尝试 Finnhub 触发
+    if not earnings_subsection:
+        finnhub_key = os.environ.get("FINNHUB_API_KEY")
+        if finnhub_key:
+            logger.info("Step 2e (Finnhub 辅助): 业绩日历检查")
+            try:
+                from fetchers.earnings_fetcher import fetch_finnhub_earnings_watchlist
+                from fetchers.doubao_macro import fetch_doubao_earnings_detail, fmt_earnings_subsection
+                triggered = fetch_finnhub_earnings_watchlist(now_hkt, finnhub_key)
+                if triggered:
+                    logger.info(f"[Earnings-Finnhub] 触发 {len(triggered)} 只: {[s['name'] for s in triggered]}")
+                    detail_text = fetch_doubao_earnings_detail(triggered, date_hkt=now_hkt)
+                    earnings_subsection = fmt_earnings_subsection(detail_text or "")
+                else:
+                    logger.info("[Earnings-Finnhub] watchlist 内今日无业绩公告")
+            except Exception as e:
+                logger.error(f"Finnhub 业绩辅助模块异常: {e}")
 
     # ── Step 2d: 抓取个股新闻 ─────────────────────────────────────────────────
     logger.info("Step 2d: 抓取个股新闻")
