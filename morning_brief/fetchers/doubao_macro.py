@@ -356,7 +356,7 @@ def fetch_doubao_ipo(
         logger.info("[DoubaoIPO] 独立搜索模式（爬虫无数据）")
 
     try:
-        output = _call_doubao(system_prompt, user_prompt, bot_id, max_tokens=800)
+        output = _call_doubao(system_prompt, user_prompt, bot_id, max_tokens=2000)
         logger.info(f"[DoubaoIPO] 成功，{len(output)} 字")
         return output
     except Exception as e:
@@ -917,7 +917,7 @@ def fetch_doubao_earnings_watchlist(
         # watchlist ~46 只，有业绩的通常 3-10 只，每只约 250 tokens
         output = _call_doubao(
             _SYSTEM_EARNINGS_WATCHLIST, user_prompt, bot_id,
-            max_tokens=800,
+            max_tokens=2500,
         )
         # 无业绩时返回约定短语，视为 None
         if "無業績公告" in output or "无业绩" in output:
