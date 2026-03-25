@@ -361,7 +361,7 @@ def fetch_doubao_ipo(
         logger.info("[DoubaoIPO] 独立搜索模式（爬虫无数据）")
 
     try:
-        output = _call_doubao(system_prompt, user_prompt, bot_id, max_tokens=2000)
+        output = _call_doubao(system_prompt, user_prompt, bot_id, max_tokens=4000)
         logger.info(f"[DoubaoIPO] 成功，{len(output)} 字")
         return output
     except Exception as e:
@@ -388,7 +388,7 @@ def fetch_doubao_market_summary(date_hkt: datetime = None) -> Optional[str]:
     user_prompt = _USER_MARKET_SUMMARY.format(date=date_str)
 
     try:
-        output = _call_doubao(_SYSTEM_MARKET_SUMMARY, user_prompt, bot_id, max_tokens=200)
+        output = _call_doubao(_SYSTEM_MARKET_SUMMARY, user_prompt, bot_id, max_tokens=400)
         logger.info(f"[DoubaoMarket] 成功，{len(output)} 字")
         return output
     except Exception as e:
@@ -412,12 +412,14 @@ def parse_market_summary(raw_text: str) -> dict:
     缺失/无效字段置为 None，不抛异常。
     """
     def _parse_float(s: str) -> Optional[float]:
-        if not s or s.strip().upper() == "N/A":
+        if not s or s.strip().upper() in ("N/A", "NAN", ""):
             return None
         # 去掉 %、+ 号等
         s = s.strip().lstrip("+").rstrip("%").replace(",", "")
         try:
-            return float(s)
+            result = float(s)
+            import math
+            return None if math.isnan(result) else result
         except ValueError:
             return None
 

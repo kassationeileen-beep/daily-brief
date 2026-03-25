@@ -76,7 +76,6 @@ def build_brief(
     macro_section: str = "",
     ipo_section: str = "",
     buyback_subsection: str = "",
-    earnings_subsection: str = "",
 ) -> str:
     date_str = now_hkt.strftime("%Y-%m-%d")           # 今日：用于标题
     date_compact = now_hkt.strftime("%Y%m%d")
@@ -159,13 +158,11 @@ WTI原油：{fxv("WTI", 2)}"""
         fx_block = "▶️二、*關鍵匯率*\n" + warn("匯率")
 
     # ── 第四部分：个股动态 ────────────────────────────────────────────────────
-    # 结构：回购 → 业绩公告 → 个股新闻
+    # 结构：回购 → 个股新闻
     section4_parts = ["▶️四、*個股動態*"]
     if buyback_subsection:
         section4_parts.append(buyback_subsection)
-    if earnings_subsection:
-        section4_parts.append(earnings_subsection)
-    has_prefix = bool(buyback_subsection or earnings_subsection)
+    has_prefix = bool(buyback_subsection)
     if stock_sections:
         if has_prefix:
             section4_parts.append("**個股新聞**")
@@ -462,42 +459,6 @@ def main():
         except Exception as e:
             logger.error(f"豆包回购模块异常: {e}")
 
-    # ── Step 2e: 业绩公告（豆包 watchlist 模式，Finnhub 辅助去重）─────────────
-    # 主路径：直接将完整 watchlist 喂给豆包，让其自行判断哪些有近48h业绩
-    # 辅助：若有 Finnhub API key，额外触发一次以补充豆包可能遗漏的股票
-    earnings_subsection = ""
-    doubao_earnings_available = bool(os.environ.get("ARK_API_KEY") and (
-        os.environ.get("DOUBAO_BOT_EARNINGS") or os.environ.get("DOUBAO_BOT_MACRO")
-    ))
-
-    if doubao_earnings_available:
-        logger.info("Step 2e: 豆包业绩查询（watchlist 模式）")
-        try:
-            from fetchers.doubao_macro import fetch_doubao_earnings_watchlist, fmt_earnings_subsection
-            from fetchers.stock_news import HK_STOCKS
-            earnings_text = fetch_doubao_earnings_watchlist(HK_STOCKS, date_hkt=now_hkt)
-            earnings_subsection = fmt_earnings_subsection(earnings_text or "")
-        except Exception as e:
-            logger.error(f"豆包业绩 watchlist 模块异常: {e}")
-
-    # Finnhub 辅助（可选）：若配置了 key 且豆包业绩段为空，尝试 Finnhub 触发
-    if not earnings_subsection:
-        finnhub_key = os.environ.get("FINNHUB_API_KEY")
-        if finnhub_key:
-            logger.info("Step 2e (Finnhub 辅助): 业绩日历检查")
-            try:
-                from fetchers.earnings_fetcher import fetch_finnhub_earnings_watchlist
-                from fetchers.doubao_macro import fetch_doubao_earnings_detail, fmt_earnings_subsection
-                triggered = fetch_finnhub_earnings_watchlist(now_hkt, finnhub_key)
-                if triggered:
-                    logger.info(f"[Earnings-Finnhub] 触发 {len(triggered)} 只: {[s['name'] for s in triggered]}")
-                    detail_text = fetch_doubao_earnings_detail(triggered, date_hkt=now_hkt)
-                    earnings_subsection = fmt_earnings_subsection(detail_text or "")
-                else:
-                    logger.info("[Earnings-Finnhub] watchlist 内今日无业绩公告")
-            except Exception as e:
-                logger.error(f"Finnhub 业绩辅助模块异常: {e}")
-
     # ── Step 2d: 抓取个股新闻 ─────────────────────────────────────────────────
     logger.info("Step 2d: 抓取个股新闻")
     try:
@@ -523,7 +484,6 @@ def main():
         macro_section=macro_section,
         ipo_section=ipo_section,
         buyback_subsection=buyback_subsection,
-        earnings_subsection=earnings_subsection,
     )
 
     # ── Step 5: 保存到文件 ────────────────────────────────────────────────────
