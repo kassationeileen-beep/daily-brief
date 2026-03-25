@@ -844,20 +844,20 @@ _SYSTEM_EARNINGS_WATCHLIST = f"""你是服务香港证券从业者的专业金�
 {_EARNINGS_OUTPUT_FORMAT}
 
 【約束】
-- 只輸出過去48小時內確實有業績公告的公司，沒有業績的公司一律跳過（不輸出任何行）
+- 只輸出過去24小時內確實有業績公告的公司，沒有業績的公司一律跳過（不輸出任何行）
 - 數字必須來自公告原文，無數據填 N/A，不得估算
-- 若 watchlist 中所有公司均無近48小時業績，輸出：近48小時watchlist內無業績公告
+- 若 watchlist 中所有公司均無近24小時業績，輸出：近24小時watchlist內無業績公告
 - 使用繁體中文；不輸出解釋性前言後語"""
 
 _USER_EARNINGS_WATCHLIST = (
     "今天是{date}（北京時間07:30）。請從以下港股 watchlist 中，"
-    "搜索過去48小時內（{prev_date} 07:30 至今）發布業績公告的公司，按格式輸出：\n\n"
+    "搜索過去24小時內（{prev_date} 07:30 至今）發布業績公告的公司，按格式輸出：\n\n"
     "{watchlist}"
 )
 
 # ── 详情模式（Finnhub 触发备用）──────────────────────────────
 _SYSTEM_EARNINGS_DETAIL = f"""你是服务香港证券从业者的专业金融早报编辑。
-任務：搜索以下港股公司近日（過去48小時內）發布的業績公告，按三段式格式輸出要點。
+任務：搜索以下港股公司近日（過去24小時內）發布的業績公告，按三段式格式輸出要點。
 
 【輸出格式，每只股票一塊，中間用「---」分隔】
 {_EARNINGS_OUTPUT_FORMAT}
@@ -865,7 +865,7 @@ _SYSTEM_EARNINGS_DETAIL = f"""你是服务香港证券从业者的专业金融�
 【約束】
 - 使用繁體中文
 - 數字必須來自公告原文，無數據填 N/A，不得估算
-- 若某只股票確實無近48小時業績公告，跳過該股票不輸出
+- 若某只股票確實無近24小時業績公告，跳過該股票不輸出
 - 不輸出任何說明性前言後語"""
 
 _USER_EARNINGS_DETAIL = (
@@ -917,7 +917,7 @@ def fetch_doubao_earnings_watchlist(
         )
         # 无业绩时返回约定短语，视为 None
         if "無業績公告" in output or "无业绩" in output:
-            logger.info("[DoubaoEarnings-WL] watchlist 内近48h无业绩")
+            logger.info("[DoubaoEarnings-WL] watchlist 内近24h无业绩")
             return None
         logger.info(f"[DoubaoEarnings-WL] 成功，{len(output)} 字")
         return output
