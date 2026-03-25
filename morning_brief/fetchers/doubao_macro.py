@@ -231,18 +231,22 @@ def _call_doubao(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": model_id,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": temperature,
-    }
-    # bot 端点（bot-xxx）的 max_tokens 受控台配置限制，超出会 400；
-    # 非 bot 端点（ep-xxx）可以显式指定
-    if not model_id.startswith("bot-"):
-        payload["max_tokens"] = max_tokens
+    is_bot = model_id.startswith("bot-")
+    if is_bot:
+        # bot 端点不支持 system role / max_tokens / temperature 等额外参数；
+        # 将 system 指令并入 user 消息
+        messages = [{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
+        payload = {"model": model_id, "messages": messages}
+    else:
+        payload = {
+            "model": model_id,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
 
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(endpoint, json=payload, headers=headers)
