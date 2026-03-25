@@ -243,6 +243,8 @@ def _call_doubao(
 
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(endpoint, json=payload, headers=headers)
+        if not resp.is_success:
+            logger.error(f"[Doubao] {resp.status_code} body: {resp.text[:500]}")
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
 
