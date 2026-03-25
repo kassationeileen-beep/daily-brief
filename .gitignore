@@ -32,3 +32,4 @@ morning_brief/seen_events.json
 .vscode/
 .idea/
 *.swp
+*.pyc
