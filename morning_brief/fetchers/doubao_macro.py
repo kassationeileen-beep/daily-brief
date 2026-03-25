@@ -237,11 +237,9 @@ def _call_doubao(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
+        "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    # bot-xxx 端点由控制台配置输出上限，不传 max_tokens 避免超限报 400
-    if not model_id.startswith("bot-"):
-        payload["max_tokens"] = max_tokens
 
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(endpoint, json=payload, headers=headers)
@@ -356,7 +354,7 @@ def fetch_doubao_ipo(
         logger.info("[DoubaoIPO] 独立搜索模式（爬虫无数据）")
 
     try:
-        output = _call_doubao(system_prompt, user_prompt, bot_id, max_tokens=2000)
+        output = _call_doubao(system_prompt, user_prompt, bot_id, max_tokens=800)
         logger.info(f"[DoubaoIPO] 成功，{len(output)} 字")
         return output
     except Exception as e:
@@ -917,7 +915,7 @@ def fetch_doubao_earnings_watchlist(
         # watchlist ~46 只，有业绩的通常 3-10 只，每只约 250 tokens
         output = _call_doubao(
             _SYSTEM_EARNINGS_WATCHLIST, user_prompt, bot_id,
-            max_tokens=2500,
+            max_tokens=800,
         )
         # 无业绩时返回约定短语，视为 None
         if "無業績公告" in output or "无业绩" in output:
