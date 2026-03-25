@@ -237,9 +237,11 @@ def _call_doubao(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "max_tokens": max_tokens,
         "temperature": temperature,
     }
+    # bot-xxx 端点由控制台配置输出上限，不传 max_tokens 避免超限报 400
+    if not model_id.startswith("bot-"):
+        payload["max_tokens"] = max_tokens
 
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(endpoint, json=payload, headers=headers)
