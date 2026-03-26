@@ -278,7 +278,7 @@ def main():
     # ── Step 0: 读取 Telegram 人工精选输入 ───────────────────────────────────
     # 需配置 TELEGRAM_INPUT_CHANNEL_ID（与输出频道独立的输入频道）
     # 若未配置则跳过，完全依赖自动抓取
-    manual_bundle: dict = {"macro": [], "stocks": {}, "ipo": [], "unclassified": []}
+    manual_bundle: dict = {"macro_cn": [], "macro_global": [], "macro": [], "stocks": {}, "ipo": [], "unclassified": []}
     input_channel_id = os.environ.get("TELEGRAM_INPUT_CHANNEL_ID")
     if input_channel_id:
         logger.info("Step 0: 读取 Telegram 人工精选输入")
@@ -296,13 +296,14 @@ def main():
                 )
                 from llm.refiner import classify_unclassified_items
                 classified = classify_unclassified_items(raw_bundle["unclassified"])
-                raw_bundle["macro"].extend(classified.get("macro", []))
+                raw_bundle["macro_cn"].extend(classified.get("macro", []))
                 raw_bundle["ipo"].extend(classified.get("ipo", []))
                 for company, items in classified.get("stocks", {}).items():
                     raw_bundle["stocks"].setdefault(company, []).extend(items)
             manual_bundle = raw_bundle
             logger.info(
-                f"Step 0 完成: 宏观{len(manual_bundle['macro'])}条 "
+                f"Step 0 完成: 中国宏观{len(manual_bundle['macro_cn'])}条 "
+                f"全球宏观{len(manual_bundle['macro_global'])}条 "
                 f"个股{len(manual_bundle['stocks'])}家 "
                 f"IPO{len(manual_bundle['ipo'])}条"
             )
@@ -380,8 +381,14 @@ def main():
                 fetch_doubao_macro_global,
                 build_doubao_macro_section,
             )
-            cn_text = fetch_doubao_macro_cn(date_hkt=now_hkt)
-            global_text = fetch_doubao_macro_global(date_hkt=now_hkt)
+            cn_text = fetch_doubao_macro_cn(
+                date_hkt=now_hkt,
+                manual_items=manual_bundle.get("macro_cn") or None,
+            )
+            global_text = fetch_doubao_macro_global(
+                date_hkt=now_hkt,
+                manual_items=manual_bundle.get("macro_global") or None,
+            )
             macro_section = build_doubao_macro_section(cn_text, global_text, date_hkt=now_hkt)
             if macro_section:
                 logger.info("[DoubaoMacro] 宏观段落生成成功，跳过 RSS+LLM 方案")
@@ -399,33 +406,21 @@ def main():
         except Exception as e:
             logger.error(f"宏观新闻抓取失败: {e}")
             macro_news_items = []
+        # RSS 降级路径：合并所有宏观人工精选（CN + Global + 通用）
+        all_manual_macro = (
+            manual_bundle.get("macro_cn", []) +
+            manual_bundle.get("macro_global", []) +
+            manual_bundle.get("macro", [])
+        )
         try:
             from llm.refiner import refine_macro_news
             macro_section = refine_macro_news(
                 macro_news_items,
-                manual_items=manual_bundle.get("macro"),
+                manual_items=all_manual_macro or None,
             )
         except Exception as e:
             logger.error(f"宏观LLM提炼失败: {e}")
             macro_section = "▶️三、*宏觀及行業動態*\n• ⚠️ LLM提炼失败，请手动补充"
-    elif manual_bundle.get("macro"):
-        # Doubao 已生成宏观段落，但仍有人工精选 → 追加到段落顶部
-        logger.info("Step 2a: 将人工精选宏观注入 Doubao 生成的段落")
-        try:
-            from llm.refiner import refine_macro_news
-            # 仅用人工条目调用一次 LLM 格式化，再前插到 Doubao 结果
-            manual_only_section = refine_macro_news(
-                [],
-                manual_items=manual_bundle.get("macro"),
-            )
-            # manual_only_section 格式: "▶️三、*...*\n• ..."
-            # 取 Doubao 段落的 header 行保留，bullets 合并
-            doubao_bullets = "\n".join(macro_section.splitlines()[1:])
-            manual_bullets = "\n".join(manual_only_section.splitlines()[1:])
-            header = macro_section.splitlines()[0]
-            macro_section = f"{header}\n{manual_bullets}\n{doubao_bullets}"
-        except Exception as e:
-            logger.warning(f"人工宏观注入失败: {e}，保留 Doubao 原始结果")
 
     # ── Step 2b: 今日招股 ─────────────────────────────────────────────────────
     # 豆包优先（信息更丰富）→ 爬虫备用
@@ -456,6 +451,7 @@ def main():
             doubao_ipo_text = fetch_doubao_ipo(
                 ipo_list=ipo_list_scraped or None,   # None→独立搜索；有数据→丰富模式
                 date_hkt=now_hkt,
+                manual_hints=manual_bundle.get("ipo") or None,
             )
             if doubao_ipo_text:
                 ipo_section = fmt_doubao_ipo_section_smart(doubao_ipo_text, today_date=now_hkt.date())

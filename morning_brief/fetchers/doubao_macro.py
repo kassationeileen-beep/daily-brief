@@ -265,9 +265,10 @@ def _get_bot_id(env_var: str, fallback_env: str = "DOUBAO_BOT_MACRO") -> Optiona
 # 三个独立查询函数
 # ─────────────────────────────────────────────
 
-def fetch_doubao_macro_cn(date_hkt: datetime = None) -> Optional[str]:
+def fetch_doubao_macro_cn(date_hkt: datetime = None, manual_items: list = None) -> Optional[str]:
     """
     用豆包 API 获取今日中国宏观要闻。
+    manual_items: 人工精选条目，注入 prompt 要求豆包优先覆盖并补充细节。
     返回格式化文本（以 🔸中國宏觀 开头），或 None（失败时）。
     """
     bot_id = _get_bot_id("DOUBAO_BOT_MACRO_CN")
@@ -281,9 +282,13 @@ def fetch_doubao_macro_cn(date_hkt: datetime = None) -> Optional[str]:
 
     date_str = date_hkt.strftime("%Y年%m月%d日")
     user_prompt = _USER_MACRO_CN.format(date=date_str)
+    if manual_items:
+        hints = "\n".join(f"- {item}" for item in manual_items)
+        user_prompt += f"\n\n【人工精選補充提示，請確保在輸出中涵蓋以下事項（如屬實請補充數據）：】\n{hints}"
+        logger.info(f"[DoubaoMacro-CN] 注入 {len(manual_items)} 条人工精选")
 
     try:
-        output = _call_doubao(_SYSTEM_MACRO_CN, user_prompt, bot_id, max_tokens=600)
+        output = _call_doubao(_SYSTEM_MACRO_CN, user_prompt, bot_id, max_tokens=600 + 150 * len(manual_items or []))
         logger.info(f"[DoubaoMacro-CN] 成功，{len(output)} 字")
         return output
     except Exception as e:
@@ -291,9 +296,10 @@ def fetch_doubao_macro_cn(date_hkt: datetime = None) -> Optional[str]:
         return None
 
 
-def fetch_doubao_macro_global(date_hkt: datetime = None) -> Optional[str]:
+def fetch_doubao_macro_global(date_hkt: datetime = None, manual_items: list = None) -> Optional[str]:
     """
     用豆包 API 获取今日全球宏观要闻。
+    manual_items: 人工精选条目（含地缘政治），注入 prompt 要求豆包优先覆盖并补充细节。
     返回格式化文本（以 🔸全球宏觀 开头），或 None（失败时）。
     """
     bot_id = _get_bot_id("DOUBAO_BOT_MACRO_GLOBAL")
@@ -307,9 +313,13 @@ def fetch_doubao_macro_global(date_hkt: datetime = None) -> Optional[str]:
 
     date_str = date_hkt.strftime("%Y年%m月%d日")
     user_prompt = _USER_MACRO_GLOBAL.format(date=date_str)
+    if manual_items:
+        hints = "\n".join(f"- {item}" for item in manual_items)
+        user_prompt += f"\n\n【人工精選補充提示，請確保在輸出中涵蓋以下事項（如屬實請補充數據）：】\n{hints}"
+        logger.info(f"[DoubaoMacro-Global] 注入 {len(manual_items)} 条人工精选")
 
     try:
-        output = _call_doubao(_SYSTEM_MACRO_GLOBAL, user_prompt, bot_id, max_tokens=800)
+        output = _call_doubao(_SYSTEM_MACRO_GLOBAL, user_prompt, bot_id, max_tokens=800 + 150 * len(manual_items or []))
         logger.info(f"[DoubaoMacro-Global] 成功，{len(output)} 字")
         return output
     except Exception as e:
@@ -320,12 +330,14 @@ def fetch_doubao_macro_global(date_hkt: datetime = None) -> Optional[str]:
 def fetch_doubao_ipo(
     ipo_list: list[dict] = None,
     date_hkt: datetime = None,
+    manual_hints: list = None,
 ) -> Optional[str]:
     """
     用豆包 API 获取/丰富港股新股认购信息。
 
     ipo_list 非空 → 丰富模式：DATES 行由爬虫数据预填，豆包只补内容
     ipo_list 为空/None → 独立搜索模式：豆包自行搜索，不输出 DATES 行
+    manual_hints: 人工补漏公司名列表，注入 prompt 要求豆包一并确认
     返回格式化文本，或 None（失败时）。
     """
     bot_id = _get_bot_id("DOUBAO_BOT_IPO")
@@ -359,6 +371,11 @@ def fetch_doubao_ipo(
         system_prompt = _SYSTEM_IPO_SEARCH
         user_prompt   = _USER_IPO_SEARCH.format(date=date_str, month=month, day=day)
         logger.info("[DoubaoIPO] 独立搜索模式（爬虫无数据）")
+
+    if manual_hints:
+        names = "、".join(manual_hints)
+        user_prompt += f"\n\n【人工補漏提示：以下公司可能有今日招股，請一併確認並補充（若查無認購資訊則略過）：{names}】"
+        logger.info(f"[DoubaoIPO] 注入人工补漏: {names}")
 
     try:
         output = _call_doubao(system_prompt, user_prompt, bot_id, max_tokens=4000)

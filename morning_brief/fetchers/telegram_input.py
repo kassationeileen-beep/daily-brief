@@ -21,7 +21,10 @@ logger = logging.getLogger(__name__)
 OFFSET_FILE = Path(__file__).parent.parent / "telegram_input_offset.json"
 
 # ── 分类标签集合 ────────────────────────────────────────────────────────────
-MACRO_TAGS = {"#宏观", "#宏觀", "#macro"}
+MACRO_TAGS = {"#宏观", "#宏觀", "#macro"}                              # 通用宏观 → 默认归中国宏观
+MACRO_CN_TAGS = {"#中国宏观", "#中國宏觀", "#china_macro"}             # 明确中国宏观
+MACRO_GLOBAL_TAGS = {"#全球宏观", "#全球宏觀", "#global_macro",        # 明确全球/地缘
+                     "#地缘政治", "#地緣政治", "#美联储", "#美聯儲"}
 IPO_TAGS = {"#ipo", "#新股", "#招股"}
 STOCKS_GENERIC_TAGS = {"#个股", "#個股", "#stocks"}
 
@@ -33,7 +36,7 @@ _US_TICKER_RE = re.compile(r"#([A-Z]{2,5})\b")
 _CN_NAME_RE = re.compile(r"#([\u4e00-\u9fff]{2,8})")
 
 # 已知非公司标签（用于排除误识别）
-_KNOWN_NON_COMPANY = MACRO_TAGS | IPO_TAGS | STOCKS_GENERIC_TAGS | {
+_KNOWN_NON_COMPANY = MACRO_TAGS | MACRO_CN_TAGS | MACRO_GLOBAL_TAGS | IPO_TAGS | STOCKS_GENERIC_TAGS | {
     "#A股", "#港股", "#美股", "#行业", "#行業",
 }
 
@@ -146,10 +149,20 @@ def _parse_message(text: str) -> dict:
     for line in lines:
         lower = line.lower()
 
-        # 宏观
-        for t in MACRO_TAGS:
+        # 全球宏观/地缘政治（优先级高于通用宏观）
+        for t in MACRO_GLOBAL_TAGS:
             if t.lower() in lower:
-                section = "macro"
+                section = "macro_global"
+
+        # 中国宏观（优先级高于通用宏观）
+        for t in MACRO_CN_TAGS:
+            if t.lower() in lower and section != "macro_global":
+                section = "macro_cn"
+
+        # 通用宏观（未指定 CN/Global → 默认归中国宏观）
+        for t in MACRO_TAGS:
+            if t.lower() in lower and section not in ("macro_cn", "macro_global"):
+                section = "macro_cn"
 
         # IPO
         for t in IPO_TAGS:
@@ -219,7 +232,7 @@ def fetch_manual_inputs(
         "unclassified": ["未分类文本1", ...],
     }
     """
-    bundle: dict = {"macro": [], "stocks": {}, "ipo": [], "unclassified": []}
+    bundle: dict = {"macro_cn": [], "macro_global": [], "macro": [], "stocks": {}, "ipo": [], "unclassified": []}
 
     offset = _load_offset()
     # 若已有 offset，从下一条开始取（同时向 Telegram 确认已处理之前的 update）
@@ -257,8 +270,8 @@ def fetch_manual_inputs(
         content = parsed["content"]
         company = parsed["company"]
 
-        if section == "macro":
-            bundle["macro"].append(content)
+        if section in ("macro_cn", "macro_global", "macro"):
+            bundle[section].append(content)
         elif section == "ipo":
             bundle["ipo"].append(content)
         elif section == "stocks":
@@ -276,7 +289,7 @@ def fetch_manual_inputs(
 
     logger.info(
         f"[TelegramInput] 读取完毕 共{matched}条有效消息 "
-        f"| 宏观{len(bundle['macro'])} 个股{len(bundle['stocks'])}家 "
-        f"IPO{len(bundle['ipo'])} 未分类{len(bundle['unclassified'])}"
+        f"| 中国宏观{len(bundle['macro_cn'])} 全球宏观{len(bundle['macro_global'])} "
+        f"个股{len(bundle['stocks'])}家 IPO{len(bundle['ipo'])} 未分类{len(bundle['unclassified'])}"
     )
     return bundle
