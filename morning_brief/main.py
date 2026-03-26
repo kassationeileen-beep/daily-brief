@@ -474,6 +474,7 @@ def main():
     # 豆包搜索全港 24h 回购 → Python 匹配 watchlist → 格式化子段落
     # 百胜中国（T+2 披露惯例）单独 48h 查询，合并进结果
     buyback_subsection = ""
+    matched_buybacks = []  # 豆包结果 + 人工补录，统一在此累积
     doubao_buyback_available = bool(os.environ.get("ARK_API_KEY") and (
         os.environ.get("DOUBAO_BOT_BUYBACK") or os.environ.get("DOUBAO_BOT_MACRO")
     ))
@@ -503,31 +504,33 @@ def main():
                     all_items.append(item)
                     existing_codes.add(item["code"])
 
-            # 匹配 watchlist，格式化
-            matched = match_watchlist_buybacks(all_items, HK_STOCKS)
-
-            # 合并人工补录的回购（豆包漏掉的）
-            manual_buybacks = manual_bundle.get("buyback", {})
-            if manual_buybacks:
-                auto_codes = {m["code"].lstrip("0").zfill(4) for m in matched}
-                for key, contents in manual_buybacks.items():
-                    code = key.zfill(4) if key.isdigit() else "0000"
-                    if code not in auto_codes:  # 仅补漏，不覆盖豆包已找到的
-                        matched.append({
-                            "code": code,
-                            "name": key,
-                            "watchlist_name": key,
-                            "note": " / ".join(contents),
-                        })
-                        logger.info(f"[ManualBuyback] 补录回购: {key}")
-
-            buyback_subsection = fmt_buyback_subsection(matched)
-            if matched:
-                logger.info(f"[DoubaoByback] watchlist 命中 {len(matched)} 只：{[m['watchlist_name'] for m in matched]}")
+            # 匹配 watchlist
+            matched_buybacks = match_watchlist_buybacks(all_items, HK_STOCKS)
+            if matched_buybacks:
+                logger.info(f"[DoubaoByback] watchlist 命中 {len(matched_buybacks)} 只：{[m['watchlist_name'] for m in matched_buybacks]}")
             else:
                 logger.info("[DoubaoByback] watchlist 内今日无回购")
         except Exception as e:
             logger.error(f"豆包回购模块异常: {e}")
+
+    # 人工补录回购（无论豆包是否可用/成功，均执行）
+    manual_buybacks = manual_bundle.get("buyback", {})
+    if manual_buybacks:
+        auto_codes = {m["code"].lstrip("0").zfill(4) for m in matched_buybacks}
+        for key, contents in manual_buybacks.items():
+            code = key.zfill(4) if key.isdigit() else "0000"
+            if code not in auto_codes:
+                matched_buybacks.append({
+                    "code": code,
+                    "name": key,
+                    "watchlist_name": key,
+                    "note": " / ".join(contents),
+                })
+                logger.info(f"[ManualBuyback] 补录回购: {key}")
+
+    if matched_buybacks:
+        from fetchers.doubao_macro import fmt_buyback_subsection as _fmt_buyback
+        buyback_subsection = _fmt_buyback(matched_buybacks)
 
     # ── Step 2d: 抓取个股新闻 ─────────────────────────────────────────────────
     logger.info("Step 2d: 抓取个股新闻")

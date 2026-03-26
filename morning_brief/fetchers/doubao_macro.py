@@ -284,11 +284,14 @@ def fetch_doubao_macro_cn(date_hkt: datetime = None, manual_items: list = None) 
     user_prompt = _USER_MACRO_CN.format(date=date_str)
     if manual_items:
         hints = "\n".join(f"- {item}" for item in manual_items)
-        user_prompt += f"\n\n【人工精選補充提示，請確保在輸出中涵蓋以下事項（如屬實請補充數據）：】\n{hints}"
+        user_prompt += (
+            f"\n\n【強制補充項目（用戶已確認，必須全部輸出，不受條數上限約束，"
+            f"請搜索詳情並補充具體數字）：】\n{hints}"
+        )
         logger.info(f"[DoubaoMacro-CN] 注入 {len(manual_items)} 条人工精选")
 
     try:
-        output = _call_doubao(_SYSTEM_MACRO_CN, user_prompt, bot_id, max_tokens=600 + 150 * len(manual_items or []))
+        output = _call_doubao(_SYSTEM_MACRO_CN, user_prompt, bot_id, max_tokens=600 + 200 * len(manual_items or []))
         logger.info(f"[DoubaoMacro-CN] 成功，{len(output)} 字")
         return output
     except Exception as e:
@@ -315,11 +318,14 @@ def fetch_doubao_macro_global(date_hkt: datetime = None, manual_items: list = No
     user_prompt = _USER_MACRO_GLOBAL.format(date=date_str)
     if manual_items:
         hints = "\n".join(f"- {item}" for item in manual_items)
-        user_prompt += f"\n\n【人工精選補充提示，請確保在輸出中涵蓋以下事項（如屬實請補充數據）：】\n{hints}"
+        user_prompt += (
+            f"\n\n【強制補充項目（用戶已確認，必須全部輸出，不受條數上限約束，"
+            f"請搜索詳情並補充具體數字）：】\n{hints}"
+        )
         logger.info(f"[DoubaoMacro-Global] 注入 {len(manual_items)} 条人工精选")
 
     try:
-        output = _call_doubao(_SYSTEM_MACRO_GLOBAL, user_prompt, bot_id, max_tokens=800 + 150 * len(manual_items or []))
+        output = _call_doubao(_SYSTEM_MACRO_GLOBAL, user_prompt, bot_id, max_tokens=800 + 200 * len(manual_items or []))
         logger.info(f"[DoubaoMacro-Global] 成功，{len(output)} 字")
         return output
     except Exception as e:
