@@ -455,8 +455,10 @@ def refine_all_stocks(
             name = info.get("name", code)
             news = info.get("news", [])
 
-            # 查找人工输入：按公司名或代码匹配
-            manual = manual_stock_items.get(name, []) + manual_stock_items.get(code, [])
+            # 查找人工输入：按公司名或代码匹配，去重保留顺序
+            manual = list(dict.fromkeys(
+                manual_stock_items.get(name, []) + manual_stock_items.get(code, [])
+            ))
             processed_manual_keys.add(name)
             processed_manual_keys.add(code)
 
@@ -481,6 +483,7 @@ def refine_all_stocks(
     extra = {k: v for k, v in manual_stock_items.items()
              if k not in processed_manual_keys and v}
     for company, manual in extra.items():
+        manual = list(dict.fromkeys(manual))  # 去重
         logger.info(f"  提炼 [{company}]（人工输入，watchlist外，{len(manual)}条）...")
         result = refine_stock_news(
             company, [], history_context,

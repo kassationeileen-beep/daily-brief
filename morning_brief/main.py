@@ -4,6 +4,7 @@ main.py — 金融早报自动化主程序
 运行时间：每日 UTC 23:30（HKT 07:30）
 """
 import os
+import re
 import sys
 import logging
 import textwrap
@@ -536,6 +537,45 @@ def main():
     except Exception as e:
         logger.error(f"个股新闻模块失败: {e}")
         all_news = {}
+
+    # ── Step 2e: 豆包搜索人工触发的业绩公告 ──────────────────────────────────
+    # 检测 manual stocks 中含业绩关键词的公司 → 调豆包搜详情 → 注入 manual items
+    _EARNINGS_KW = {"业绩", "業績", "财报", "財報", "盈利", "营收", "公告", "年报", "年報", "中报", "中報"}
+    doubao_earnings_available = bool(os.environ.get("ARK_API_KEY") and (
+        os.environ.get("DOUBAO_BOT_EARNINGS") or os.environ.get("DOUBAO_BOT_MACRO")
+    ))
+    if doubao_earnings_available and manual_bundle.get("stocks"):
+        try:
+            from fetchers.stock_news import HK_STOCKS
+            from fetchers.doubao_macro import fetch_doubao_earnings_detail
+            earnings_targets = []
+            for key, items in manual_bundle["stocks"].items():
+                if any(kw in " ".join(items) for kw in _EARNINGS_KW):
+                    if re.match(r"^\d{4,5}$", key):
+                        earnings_targets.append({"code": key.zfill(4), "name": key})
+                    else:
+                        hk_code = next(
+                            (c for c, n in HK_STOCKS.items() if n == key or key in n or n in key),
+                            None
+                        )
+                        earnings_targets.append({
+                            "code": hk_code.zfill(4) if hk_code else "0000",
+                            "name": key,
+                        })
+            if earnings_targets:
+                logger.info(f"Step 2e: 豆包搜索 {len(earnings_targets)} 家人工触发业绩")
+                earnings_text = fetch_doubao_earnings_detail(earnings_targets, date_hkt=now_hkt)
+                if earnings_text:
+                    for block in earnings_text.split("---"):
+                        block = block.strip()
+                        if not block:
+                            continue
+                        for key in list(manual_bundle["stocks"].keys()):
+                            if key in block or (key.isdigit() and key.zfill(5) in block):
+                                manual_bundle["stocks"][key].insert(0, f"[豆包業績]\n{block}")
+                                break
+        except Exception as e:
+            logger.warning(f"Step 2e: 业绩豆包搜索失败: {e}")
 
     # ── Step 3: LLM 提炼个股动态 ──────────────────────────────────────────────
     logger.info("Step 3: LLM 提炼个股动态")
