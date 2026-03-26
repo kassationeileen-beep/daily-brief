@@ -10,6 +10,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+try:
+    import zhconv
+    def _to_simp(s: str) -> str:
+        return zhconv.convert(s, "zh-hans")
+except ImportError:
+    def _to_simp(s: str) -> str:
+        return s
+
 logger = logging.getLogger(__name__)
 
 SEEN_EVENTS_PATH = Path(__file__).parent.parent / "seen_events.json"
@@ -455,11 +463,15 @@ def refine_all_stocks(
             name = info.get("name", code)
             news = info.get("news", [])
 
-            # 查找人工输入：按公司名或代码匹配，去重保留顺序
+            # 查找人工输入：按公司名或代码匹配（含简体→繁体兼容），去重保留顺序
+            name_simp = _to_simp(name)
             manual = list(dict.fromkeys(
-                manual_stock_items.get(name, []) + manual_stock_items.get(code, [])
+                manual_stock_items.get(name, []) +
+                manual_stock_items.get(name_simp, []) +
+                manual_stock_items.get(code, [])
             ))
             processed_manual_keys.add(name)
+            processed_manual_keys.add(name_simp)
             processed_manual_keys.add(code)
 
             if not news and not manual:
