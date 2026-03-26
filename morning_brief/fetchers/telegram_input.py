@@ -210,6 +210,7 @@ def _parse_message(text: str) -> dict:
     return {
         "section": section or "unclassified",
         "company": company,
+        "companies": company_tags,   # 全部公司 tag，支持一条消息多家公司
         "content": content,
     }
 
@@ -275,8 +276,9 @@ def fetch_manual_inputs(
         elif section == "ipo":
             bundle["ipo"].append(content)
         elif section == "stocks":
-            key = company or "未知公司"
-            bundle["stocks"].setdefault(key, []).append(content)
+            companies = parsed.get("companies") or ([company] if company else ["未知公司"])
+            for key in companies:
+                bundle["stocks"].setdefault(key, []).append(content)
         else:
             bundle["unclassified"].append(content)
 
