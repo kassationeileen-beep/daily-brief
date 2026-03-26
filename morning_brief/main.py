@@ -284,8 +284,9 @@ def main():
         logger.info("Step 0: 读取 Telegram 人工精选输入")
         try:
             from fetchers.telegram_input import fetch_manual_inputs
+            input_bot_token = os.environ.get("TELEGRAM_INPUT_BOT_TOKEN") or os.environ["TELEGRAM_TOKEN"]
             raw_bundle = fetch_manual_inputs(
-                token=os.environ["TELEGRAM_TOKEN"],
+                token=input_bot_token,
                 channel_id=input_channel_id,
             )
             # 未分类条目交 LLM 自动分类
