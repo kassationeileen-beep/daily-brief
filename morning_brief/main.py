@@ -275,6 +275,41 @@ def main():
         logger.error(f"缺少环境变量: {missing}")
         sys.exit(1)
 
+    # ── Step 0: 读取 Telegram 人工精选输入 ───────────────────────────────────
+    # 需配置 TELEGRAM_INPUT_CHANNEL_ID（与输出频道独立的输入频道）
+    # 若未配置则跳过，完全依赖自动抓取
+    manual_bundle: dict = {"macro": [], "stocks": {}, "ipo": [], "unclassified": []}
+    input_channel_id = os.environ.get("TELEGRAM_INPUT_CHANNEL_ID")
+    if input_channel_id:
+        logger.info("Step 0: 读取 Telegram 人工精选输入")
+        try:
+            from fetchers.telegram_input import fetch_manual_inputs
+            raw_bundle = fetch_manual_inputs(
+                token=os.environ["TELEGRAM_TOKEN"],
+                channel_id=input_channel_id,
+            )
+            # 未分类条目交 LLM 自动分类
+            if raw_bundle.get("unclassified"):
+                logger.info(
+                    f"Step 0: LLM 分类 {len(raw_bundle['unclassified'])} 条未打标签消息"
+                )
+                from llm.refiner import classify_unclassified_items
+                classified = classify_unclassified_items(raw_bundle["unclassified"])
+                raw_bundle["macro"].extend(classified.get("macro", []))
+                raw_bundle["ipo"].extend(classified.get("ipo", []))
+                for company, items in classified.get("stocks", {}).items():
+                    raw_bundle["stocks"].setdefault(company, []).extend(items)
+            manual_bundle = raw_bundle
+            logger.info(
+                f"Step 0 完成: 宏观{len(manual_bundle['macro'])}条 "
+                f"个股{len(manual_bundle['stocks'])}家 "
+                f"IPO{len(manual_bundle['ipo'])}条"
+            )
+        except Exception as e:
+            logger.warning(f"Step 0: 人工输入读取失败: {e}，继续使用纯自动抓取")
+    else:
+        logger.info("Step 0: 未配置 TELEGRAM_INPUT_CHANNEL_ID，跳过人工输入")
+
     # ── Step 1: 抓取市场数据 ──────────────────────────────────────────────────
     logger.info("Step 1: 抓取市场数据（结构化 scraper）")
     try:
@@ -355,7 +390,7 @@ def main():
             logger.error(f"豆包宏观模块异常: {e}，降级到 RSS+LLM")
 
     if macro_section is None:
-        # 降级：RSS 抓取 + LLM 提炼
+        # 降级：RSS 抓取 + LLM 提炼（含人工精选注入）
         logger.info("Step 2a (降级): 抓取宏观 RSS + LLM 提炼")
         try:
             from fetchers.macro_news import fetch_macro_news
@@ -365,10 +400,31 @@ def main():
             macro_news_items = []
         try:
             from llm.refiner import refine_macro_news
-            macro_section = refine_macro_news(macro_news_items)
+            macro_section = refine_macro_news(
+                macro_news_items,
+                manual_items=manual_bundle.get("macro"),
+            )
         except Exception as e:
             logger.error(f"宏观LLM提炼失败: {e}")
             macro_section = "▶️三、*宏觀及行業動態*\n• ⚠️ LLM提炼失败，请手动补充"
+    elif manual_bundle.get("macro"):
+        # Doubao 已生成宏观段落，但仍有人工精选 → 追加到段落顶部
+        logger.info("Step 2a: 将人工精选宏观注入 Doubao 生成的段落")
+        try:
+            from llm.refiner import refine_macro_news
+            # 仅用人工条目调用一次 LLM 格式化，再前插到 Doubao 结果
+            manual_only_section = refine_macro_news(
+                [],
+                manual_items=manual_bundle.get("macro"),
+            )
+            # manual_only_section 格式: "▶️三、*...*\n• ..."
+            # 取 Doubao 段落的 header 行保留，bullets 合并
+            doubao_bullets = "\n".join(macro_section.splitlines()[1:])
+            manual_bullets = "\n".join(manual_only_section.splitlines()[1:])
+            header = macro_section.splitlines()[0]
+            macro_section = f"{header}\n{manual_bullets}\n{doubao_bullets}"
+        except Exception as e:
+            logger.warning(f"人工宏观注入失败: {e}，保留 Doubao 原始结果")
 
     # ── Step 2b: 今日招股 ─────────────────────────────────────────────────────
     # 豆包优先（信息更丰富）→ 爬虫备用
@@ -472,7 +528,11 @@ def main():
     logger.info("Step 3: LLM 提炼个股动态")
     try:
         from llm.refiner import refine_all_stocks
-        stock_sections = refine_all_stocks(all_news, llm_interval=1.0)
+        stock_sections = refine_all_stocks(
+            all_news,
+            llm_interval=1.0,
+            manual_stock_items=manual_bundle.get("stocks"),
+        )
     except Exception as e:
         logger.error(f"LLM 提炼失败: {e}")
         stock_sections = [f"⚠️ LLM提炼失败: {e}"]
