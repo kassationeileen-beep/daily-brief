@@ -353,38 +353,56 @@ def refine_stock_news(
     history_context: str,
     is_us: bool = False,
     today_str: str = "",
+    manual_items: list[str] = None,
 ) -> Optional[str]:
     """
-    返回格式化字符串如 "🔸腾讯：1）..."，或 None（无实质新闻）
+    返回格式化字符串如 "🔸腾讯：1）..."，或 None（无实质新闻）。
+    manual_items: 人工精选输入，优先级最高，跳过重要性过滤，全部保留。
     """
-    if not news_items:
+    manual_items = manual_items or []
+
+    if not news_items and not manual_items:
         return None
 
-    # 第一层：按发布日期过滤
+    # 第一层：按发布日期过滤（仅对自动抓取）
     fresh_items = filter_fresh_news(news_items, days=NEWS_FRESHNESS_DAYS)
-    # 第二层：按内容关键词过滤陈旧财报期
+    # 第二层：按内容关键词过滤陈旧财报期（仅对自动抓取）
     fresh_items = filter_stale_financial_content(fresh_items)
-    if not fresh_items:
+
+    # 无自动新闻 + 无人工输入 → 跳过
+    if not fresh_items and not manual_items:
         logger.debug(f"  [{company_name}] 无近 {NEWS_FRESHNESS_DAYS} 天新鲜新闻，跳过")
         return None
 
     today_str = today_str or datetime.now().strftime("%Y-%m-%d")
-    lang_note = "（以下为英文新闻，请翻译为繁體中文后提炼）" if is_us else ""
+    lang_note = "（以下自动抓取为英文新闻，请翻译为繁體中文后提炼）" if is_us else ""
 
-    # 构建带日期标签的新闻文本，帮助 LLM 判断新鲜度
-    news_text = fmt_news_with_date(fresh_items)
+    # 人工输入段落（若有）
+    manual_section = ""
+    if manual_items:
+        manual_lines = "\n".join(f"- {item.strip()}" for item in manual_items)
+        manual_section = (
+            f"\n[人工輸入（用戶已篩選，優先級最高，全部保留，無需判斷重要性）]\n"
+            f"{manual_lines}\n"
+        )
+
+    # 自动抓取段落
+    news_text = fmt_news_with_date(fresh_items) if fresh_items else "（無自動抓取新聞）"
 
     user_prompt = f"""今日日期：{today_str}
 公司：{company_name}
 
-[历史播报（近3天已播出事件，相同事实请勿重复输出）]
+[歷史播報（近3天已播出事件，相同事實請勿重複輸出）]
 {history_context}
-
-[待处理新闻]{lang_note}
-（每条格式：[序号][发布日期] 标题 | 摘要，超过2天前的请直接跳过）
+{manual_section}
+[自動抓取新聞]{lang_note}
+（每條格式：[序號][發布日期] 標題 | 摘要，超過2天前的請直接跳過）
 {news_text}
 
-请按格式输出，无实质新闻输出 NO_NEWS。"""
+輸出規則：
+- 人工輸入條目：全部保留並輸出，不做重要性過濾
+- 自動抓取條目：正常過濾，若與人工輸入描述同一事件，丟棄自動抓取版本
+請按格式輸出，無實質新聞輸出 NO_NEWS。"""
 
     messages = [
         {"role": "system", "content": _build_system_prompt()},
@@ -406,11 +424,20 @@ def refine_stock_news(
 # 批量提炼所有个股
 # ─────────────────────────────────────────────
 
-def refine_all_stocks(all_news: dict, llm_interval: float = 1.0) -> list[str]:
+def refine_all_stocks(
+    all_news: dict,
+    llm_interval: float = 1.0,
+    manual_stock_items: dict = None,
+) -> list[str]:
     """
     all_news 结构: {"hk": {...}, "a": {...}, "us": {...}}
+    manual_stock_items: {"腾讯"/"0700"/"TSLA": ["文本1", ...], ...}
+      - 对 watchlist 内的公司：人工输入与自动抓取合并，人工优先
+      - 对 watchlist 外的公司：仅人工输入，直接进 LLM，无自动新闻
     返回: ["🔸腾讯：...", "🔸小米：...", ...]
     """
+    manual_stock_items = manual_stock_items or {}
+
     seen_events = load_seen_events()
     seen_events = cleanup_old_events(seen_events)
     history_context = get_history_context(seen_events)
@@ -418,6 +445,7 @@ def refine_all_stocks(all_news: dict, llm_interval: float = 1.0) -> list[str]:
 
     outputs = []
     new_event_keywords = []
+    processed_manual_keys: set[str] = set()
 
     for market, stocks in [("hk", all_news.get("hk", {})),
                             ("a",  all_news.get("a", {})),
@@ -426,17 +454,43 @@ def refine_all_stocks(all_news: dict, llm_interval: float = 1.0) -> list[str]:
         for code, info in stocks.items():
             name = info.get("name", code)
             news = info.get("news", [])
-            if not news:
+
+            # 查找人工输入：按公司名或代码匹配
+            manual = manual_stock_items.get(name, []) + manual_stock_items.get(code, [])
+            processed_manual_keys.add(name)
+            processed_manual_keys.add(code)
+
+            if not news and not manual:
                 logger.debug(f"  [{name}] 无新闻，跳过")
                 continue
 
-            logger.info(f"  提炼 [{name}]（{len(news)} 条，过滤前）...")
-            result = refine_stock_news(name, news, history_context,
-                                       is_us=is_us, today_str=today_str)
+            logger.info(
+                f"  提炼 [{name}]（自动{len(news)}条 + 人工{len(manual)}条）..."
+            )
+            result = refine_stock_news(
+                name, news, history_context,
+                is_us=is_us, today_str=today_str,
+                manual_items=manual,
+            )
             if result:
                 outputs.append(result)
                 new_event_keywords.extend(extract_event_keywords(result))
             time.sleep(llm_interval)
+
+    # 处理 watchlist 外的人工输入公司
+    extra = {k: v for k, v in manual_stock_items.items()
+             if k not in processed_manual_keys and v}
+    for company, manual in extra.items():
+        logger.info(f"  提炼 [{company}]（人工输入，watchlist外，{len(manual)}条）...")
+        result = refine_stock_news(
+            company, [], history_context,
+            is_us=False, today_str=today_str,
+            manual_items=manual,
+        )
+        if result:
+            outputs.append(result)
+            new_event_keywords.extend(extract_event_keywords(result))
+        time.sleep(llm_interval)
 
     # 更新历史去重记录
     if new_event_keywords:
@@ -464,15 +518,21 @@ _MACRO_SYSTEM_PROMPT = """你是一名服务香港证券从业者的资深财经
 - 不要添加标题行，直接输出要点列表"""
 
 
-def refine_macro_news(news_items: list[dict], max_items: int = 20) -> str:
+def refine_macro_news(
+    news_items: list[dict],
+    max_items: int = 20,
+    manual_items: list[str] = None,
+) -> str:
     """
     将宏观新闻列表 → LLM → 3-5条中文要点摘要。
+    manual_items: 人工精选宏观内容，优先级最高，全部保留，不经重要性过滤。
     返回格式化的第三部分文本块，或降级纯文本摘要。
     """
-    if not news_items:
+    manual_items = manual_items or []
+
+    if not news_items and not manual_items:
         return "▶️三、*宏觀及行業動態*\n• 暫無重要宏觀動態"
 
-    # 格式化新闻列表送给 LLM（取最新 max_items 条）
     items_to_use = news_items[:max_items]
     news_text = "\n".join(
         f"[{i+1}][{item.get('source','')}] {item.get('title','')} | {item.get('content','')[:150]}"
@@ -482,22 +542,93 @@ def refine_macro_news(news_items: list[dict], max_items: int = 20) -> str:
     now = datetime.now()
     date_str = now.strftime("%Y-%m-%d")
 
+    # 人工精选段落
+    manual_section = ""
+    if manual_items:
+        manual_lines = "\n".join(f"- {item.strip()}" for item in manual_items)
+        manual_section = (
+            f"[人工精選（用戶已篩選，全部保留，優先顯示，不做重要性過濾）]\n"
+            f"{manual_lines}\n\n"
+        )
+
+    user_content = (
+        f"今日日期：{date_str}\n\n"
+        + manual_section
+        + f"[自動抓取新聞（共{len(items_to_use)}條，作為補充）]\n"
+        + news_text
+        + "\n\n輸出規則：\n"
+        + "1. 人工精選條目必須全部輸出（不過濾、不省略）\n"
+        + "2. 自動抓取條目：正常過濾，若與人工精選描述同一事件，丟棄自動抓取版本\n"
+        + f"3. 合併後輸出3-{max(6, len(manual_items) + 3)}條要點"
+        + "（繁體中文，每條以'• '開頭）："
+    )
+
     messages = [
         {"role": "system", "content": _MACRO_SYSTEM_PROMPT},
-        {"role": "user", "content": (
-            f"今日日期：{date_str}\n\n"
-            f"以下是今日宏观财经新闻（共{len(items_to_use)}条）：\n\n"
-            f"{news_text}\n\n"
-            f"请输出3-5条要点摘要（繁体中文，每条以'• '开头）："
-        )},
+        {"role": "user", "content": user_content},
     ]
 
     try:
-        output, provider = call_llm_with_fallback(messages, max_tokens=400)
+        output, provider = call_llm_with_fallback(messages, max_tokens=500)
         logger.info(f"[MacroRefine] LLM({provider}) 生成宏观摘要 {len(output)} 字")
         return f"▶️三、*宏觀及行業動態*\n{output}"
     except Exception as e:
         logger.error(f"[MacroRefine] LLM 失败: {e}，降级输出标题列表")
-        # 降级：直接输出前5条标题
-        fallback_lines = [f"• {item['title'][:60]}" for item in items_to_use[:5]]
+        fallback_lines = [f"• [精選] {item[:60]}" for item in manual_items[:3]]
+        fallback_lines += [f"• {item['title'][:60]}" for item in items_to_use[:max(0, 5 - len(fallback_lines))]]
         return "▶️三、*宏觀及行業動態*\n" + "\n".join(fallback_lines)
+
+
+def classify_unclassified_items(items: list[str]) -> dict:
+    """
+    用 LLM 对无标签的人工输入消息进行分类。
+    返回: {"macro": [...], "stocks": {"公司名": [...]}, "ipo": [...]}
+    """
+    if not items:
+        return {"macro": [], "stocks": {}, "ipo": []}
+
+    import re as _re
+
+    items_text = "\n".join(f"[{i+1}] {item.strip()}" for i, item in enumerate(items))
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是财经新闻分类助手。将每条新闻归类为以下三类之一：\n"
+                "- macro：宏观经济、央行政策、汇率、大宗商品、行业政策\n"
+                "- stocks：个股动态（需识别公司名称）\n"
+                "- ipo：新股、招股、IPO\n\n"
+                "严格输出JSON，格式如下（不加任何说明文字）：\n"
+                '{"macro": ["原文1"], "stocks": {"公司名": ["原文"]}, "ipo": ["原文"]}'
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"以下是待分类的新闻条目：\n{items_text}\n\n请输出JSON分类结果：",
+        },
+    ]
+
+    try:
+        output, provider = call_llm_with_fallback(messages, max_tokens=600)
+        # 提取 JSON 部分（防止 LLM 在前后加说明文字）
+        json_match = _re.search(r'\{.*\}', output, _re.DOTALL)
+        if json_match:
+            result = json.loads(json_match.group())
+            macro_cnt = len(result.get("macro", []))
+            stock_cnt = len(result.get("stocks", {}))
+            ipo_cnt = len(result.get("ipo", []))
+            logger.info(
+                f"[ManualClassify] LLM({provider}) 分类完成: "
+                f"宏观{macro_cnt}条 个股{stock_cnt}家 IPO{ipo_cnt}条"
+            )
+            return {
+                "macro": result.get("macro", []),
+                "stocks": result.get("stocks", {}),
+                "ipo": result.get("ipo", []),
+            }
+    except Exception as e:
+        logger.error(f"[ManualClassify] 分类失败: {e}，未分类条目全部归入宏观")
+
+    # 降级：全部归入宏观（保守处理，确保不丢失）
+    return {"macro": items, "stocks": {}, "ipo": []}
