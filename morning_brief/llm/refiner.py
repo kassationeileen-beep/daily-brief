@@ -18,6 +18,23 @@ except ImportError:
     def _to_simp(s: str) -> str:
         return s
 
+
+import re as _re
+
+def _norm(text: str) -> str:
+    """归一化用于去重：去空格标点 + 转简体"""
+    return _to_simp(_re.sub(r'[\s\W]+', '', text)).lower()
+
+
+def _dedup_manual(items: list) -> list:
+    """内容归一化去重，保留最长版本（更完整）"""
+    seen: dict = {}
+    for item in items:
+        key = _norm(item)
+        if key not in seen or len(item) > len(seen[key]):
+            seen[key] = item
+    return list(seen.values())
+
 logger = logging.getLogger(__name__)
 
 SEEN_EVENTS_PATH = Path(__file__).parent.parent / "seen_events.json"
@@ -463,13 +480,13 @@ def refine_all_stocks(
             name = info.get("name", code)
             news = info.get("news", [])
 
-            # 查找人工输入：按公司名或代码匹配（含简体→繁体兼容），去重保留顺序
+            # 查找人工输入：按公司名或代码匹配（含简体兼容），内容归一化去重
             name_simp = _to_simp(name)
-            manual = list(dict.fromkeys(
+            manual = _dedup_manual(
                 manual_stock_items.get(name, []) +
                 manual_stock_items.get(name_simp, []) +
                 manual_stock_items.get(code, [])
-            ))
+            )
             processed_manual_keys.add(name)
             processed_manual_keys.add(name_simp)
             processed_manual_keys.add(code)
@@ -495,7 +512,7 @@ def refine_all_stocks(
     extra = {k: v for k, v in manual_stock_items.items()
              if k not in processed_manual_keys and v}
     for company, manual in extra.items():
-        manual = list(dict.fromkeys(manual))  # 去重
+        manual = _dedup_manual(manual)
         logger.info(f"  提炼 [{company}]（人工输入，watchlist外，{len(manual)}条）...")
         result = refine_stock_news(
             company, [], history_context,

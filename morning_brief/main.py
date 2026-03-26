@@ -551,14 +551,27 @@ def main():
         try:
             from fetchers.stock_news import HK_STOCKS
             from fetchers.doubao_macro import fetch_doubao_earnings_detail
+            try:
+                import zhconv
+                def _s2t(s): return zhconv.convert(s, "zh-hant")
+                def _s2s(s): return zhconv.convert(s, "zh-hans")
+            except ImportError:
+                def _s2t(s): return s
+                def _s2s(s): return s
+
             earnings_targets = []
             for key, items in manual_bundle["stocks"].items():
                 if any(kw in " ".join(items) for kw in _EARNINGS_KW):
                     if re.match(r"^\d{4,5}$", key):
-                        earnings_targets.append({"code": key.zfill(4), "name": key})
+                        # 港股代码直接用
+                        name = HK_STOCKS.get(key.zfill(4), key.zfill(4))
+                        earnings_targets.append({"code": key.zfill(4), "name": name})
                     else:
+                        key_trad = _s2t(key)
                         hk_code = next(
-                            (c for c, n in HK_STOCKS.items() if n == key or key in n or n in key),
+                            (c for c, n in HK_STOCKS.items()
+                             if n == key or n == key_trad
+                             or _s2s(n) == key or _s2s(n) == _s2s(key)),
                             None
                         )
                         earnings_targets.append({
@@ -566,7 +579,8 @@ def main():
                             "name": key,
                         })
             if earnings_targets:
-                logger.info(f"Step 2e: 豆包搜索 {len(earnings_targets)} 家人工触发业绩")
+                logger.info(f"Step 2e: 豆包搜索 {len(earnings_targets)} 家人工触发业绩: "
+                            f"{[t['name'] for t in earnings_targets]}")
                 earnings_text = fetch_doubao_earnings_detail(earnings_targets, date_hkt=now_hkt)
                 if earnings_text:
                     for block in earnings_text.split("---"):
@@ -574,7 +588,9 @@ def main():
                         if not block:
                             continue
                         for key in list(manual_bundle["stocks"].keys()):
-                            if key in block or (key.isdigit() and key.zfill(5) in block):
+                            key_trad = _s2t(key)
+                            if (key in block or key_trad in block or
+                                    (key.isdigit() and key.zfill(5) in block)):
                                 manual_bundle["stocks"][key].insert(0, f"[豆包業績]\n{block}")
                                 break
         except Exception as e:
