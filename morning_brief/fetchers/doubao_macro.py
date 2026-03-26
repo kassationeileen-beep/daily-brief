@@ -827,12 +827,17 @@ def fmt_buyback_subsection(matched_items: list[dict]) -> str:
         price  = item.get("price", "")
         amount = item.get("amount", "")
 
-        if shares:
-            lines.append(f"* 回購：{shares}")
-        if price:
-            lines.append(f"* 價格：{price}")
-        if amount:
-            lines.append(f"* 金額：{amount}")
+        note = item.get("note", "")
+        if note:
+            # 人工输入：直接显示原文
+            lines.append(f"* {note}")
+        else:
+            if shares:
+                lines.append(f"* 回購：{shares}")
+            if price:
+                lines.append(f"* 價格：{price}")
+            if amount:
+                lines.append(f"* 金額：{amount}")
         lines.append("")  # 空行分隔不同股票
 
     return "\n".join(lines).rstrip()

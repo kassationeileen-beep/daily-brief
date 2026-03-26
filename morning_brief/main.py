@@ -278,7 +278,7 @@ def main():
     # ── Step 0: 读取 Telegram 人工精选输入 ───────────────────────────────────
     # 需配置 TELEGRAM_INPUT_CHANNEL_ID（与输出频道独立的输入频道）
     # 若未配置则跳过，完全依赖自动抓取
-    manual_bundle: dict = {"macro_cn": [], "macro_global": [], "macro": [], "stocks": {}, "ipo": [], "unclassified": []}
+    manual_bundle: dict = {"macro_cn": [], "macro_global": [], "macro": [], "stocks": {}, "ipo": [], "buyback": {}, "unclassified": []}
     input_channel_id = os.environ.get("TELEGRAM_INPUT_CHANNEL_ID")
     if input_channel_id:
         logger.info("Step 0: 读取 Telegram 人工精选输入")
@@ -504,6 +504,22 @@ def main():
 
             # 匹配 watchlist，格式化
             matched = match_watchlist_buybacks(all_items, HK_STOCKS)
+
+            # 合并人工补录的回购（豆包漏掉的）
+            manual_buybacks = manual_bundle.get("buyback", {})
+            if manual_buybacks:
+                auto_codes = {m["code"].lstrip("0").zfill(4) for m in matched}
+                for key, contents in manual_buybacks.items():
+                    code = key.zfill(4) if key.isdigit() else "0000"
+                    if code not in auto_codes:  # 仅补漏，不覆盖豆包已找到的
+                        matched.append({
+                            "code": code,
+                            "name": key,
+                            "watchlist_name": key,
+                            "note": " / ".join(contents),
+                        })
+                        logger.info(f"[ManualBuyback] 补录回购: {key}")
+
             buyback_subsection = fmt_buyback_subsection(matched)
             if matched:
                 logger.info(f"[DoubaoByback] watchlist 命中 {len(matched)} 只：{[m['watchlist_name'] for m in matched]}")

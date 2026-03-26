@@ -26,6 +26,7 @@ MACRO_CN_TAGS = {"#中国宏观", "#中國宏觀", "#china_macro"}             #
 MACRO_GLOBAL_TAGS = {"#全球宏观", "#全球宏觀", "#global_macro",        # 明确全球/地缘
                      "#地缘政治", "#地緣政治", "#美联储", "#美聯儲"}
 IPO_TAGS = {"#ipo", "#新股", "#招股"}
+BUYBACK_TAGS = {"#回购", "#回購", "#buyback"}
 STOCKS_GENERIC_TAGS = {"#个股", "#個股", "#stocks"}
 
 # 港股代码：# + 4-5位数字
@@ -36,7 +37,7 @@ _US_TICKER_RE = re.compile(r"#([A-Z]{2,5})\b")
 _CN_NAME_RE = re.compile(r"#([\u4e00-\u9fff]{2,8})")
 
 # 已知非公司标签（用于排除误识别）
-_KNOWN_NON_COMPANY = MACRO_TAGS | MACRO_CN_TAGS | MACRO_GLOBAL_TAGS | IPO_TAGS | STOCKS_GENERIC_TAGS | {
+_KNOWN_NON_COMPANY = MACRO_TAGS | MACRO_CN_TAGS | MACRO_GLOBAL_TAGS | IPO_TAGS | BUYBACK_TAGS | STOCKS_GENERIC_TAGS | {
     "#A股", "#港股", "#美股", "#行业", "#行業",
 }
 
@@ -169,10 +170,15 @@ def _parse_message(text: str) -> dict:
             if t.lower() in lower:
                 section = "ipo"
 
+        # 回购（优先级高于普通个股）
+        for t in BUYBACK_TAGS:
+            if t.lower() in lower:
+                section = "buyback"
+
         # 港股代码 #0700 → "0700"
         for m in _HK_CODE_RE.findall(line):
             company_tags.append(m)
-            if section not in ("macro", "ipo"):
+            if section not in ("macro_cn", "macro_global", "macro", "ipo", "buyback"):
                 section = "stocks"
 
         # 美股 ticker
@@ -180,7 +186,7 @@ def _parse_message(text: str) -> dict:
             full = f"#{m}"
             if full not in _KNOWN_NON_COMPANY:
                 company_tags.append(m)
-                if section not in ("macro", "ipo"):
+                if section not in ("macro_cn", "macro_global", "macro", "ipo", "buyback"):
                     section = "stocks"
 
         # 中文公司名标签
@@ -188,7 +194,7 @@ def _parse_message(text: str) -> dict:
             full = f"#{m}"
             if full not in _KNOWN_NON_COMPANY:
                 company_tags.append(m)
-                if section not in ("macro", "ipo"):
+                if section not in ("macro_cn", "macro_global", "macro", "ipo", "buyback"):
                     section = "stocks"
 
         # 泛个股标签（无具体公司名 → unclassified）
@@ -233,7 +239,7 @@ def fetch_manual_inputs(
         "unclassified": ["未分类文本1", ...],
     }
     """
-    bundle: dict = {"macro_cn": [], "macro_global": [], "macro": [], "stocks": {}, "ipo": [], "unclassified": []}
+    bundle: dict = {"macro_cn": [], "macro_global": [], "macro": [], "stocks": {}, "ipo": [], "buyback": {}, "unclassified": []}
 
     offset = _load_offset()
     # 若已有 offset，从下一条开始取（同时向 Telegram 确认已处理之前的 update）
@@ -279,6 +285,10 @@ def fetch_manual_inputs(
             companies = parsed.get("companies") or ([company] if company else ["未知公司"])
             for key in companies:
                 bundle["stocks"].setdefault(key, []).append(content)
+        elif section == "buyback":
+            companies = parsed.get("companies") or ([company] if company else ["未知公司"])
+            for key in companies:
+                bundle["buyback"].setdefault(key, []).append(content)
         else:
             bundle["unclassified"].append(content)
 
@@ -292,6 +302,7 @@ def fetch_manual_inputs(
     logger.info(
         f"[TelegramInput] 读取完毕 共{matched}条有效消息 "
         f"| 中国宏观{len(bundle['macro_cn'])} 全球宏观{len(bundle['macro_global'])} "
-        f"个股{len(bundle['stocks'])}家 IPO{len(bundle['ipo'])} 未分类{len(bundle['unclassified'])}"
+        f"个股{len(bundle['stocks'])}家 回购{len(bundle['buyback'])}家 "
+        f"IPO{len(bundle['ipo'])} 未分类{len(bundle['unclassified'])}"
     )
     return bundle
