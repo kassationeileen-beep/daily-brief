@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 OFFSET_FILE = Path(__file__).parent.parent / "telegram_input_offset.json"
 
 # ── 分类标签集合 ────────────────────────────────────────────────────────────
-MACRO_TAGS = {"#宏观", "#宏觀", "#macro"}
+MACRO_TAGS = {"#宏观", "#宏觀", "#macro", "#行业", "#行業", "#industry"}
 IPO_TAGS = {"#ipo", "#新股", "#招股"}
 STOCKS_GENERIC_TAGS = {"#个股", "#個股", "#stocks"}
 

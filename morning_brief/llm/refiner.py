@@ -505,13 +505,34 @@ def refine_all_stocks(
 # 第三部分：宏观 & 行业新闻摘要
 # ─────────────────────────────────────────────
 
+def _condense_macro_bullets(text: str, max_items: int = 3, max_chars: int = 35) -> str:
+    """宏观摘要精简器：最多 max_items 条、每条不超过 max_chars 字符。"""
+    lines = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("•"):
+            line = line[1:].strip()
+        line = line.replace("，", "，").replace("。", "")
+        if len(line) > max_chars:
+            line = line[:max_chars].rstrip("，；、 ") + "…"
+        if line:
+            lines.append(f"• {line}")
+        if len(lines) >= max_items:
+            break
+    if not lines:
+        return "• 暫無重要宏觀動態"
+    return "\n".join(lines)
+
+
 _MACRO_SYSTEM_PROMPT = """你是一名服务香港证券从业者的资深财经编辑。
 你的任务是从提供的英文/中文新闻列表中，提取出对港股/A股投资者最重要的宏观经济和行业动态，
 输出一份简洁的中文要点摘要。
 
 输出要求：
-- 输出3-5条要点，每条以"• "开头
-- 每条不超过60个中文字
+- 输出最多3条要点，每条以"• "开头
+- 每条不超过35个中文字，禁止背景废话
 - 优先关注：美联储/央行动向、中国经济数据、贸易/关税政策、能源/大宗商品、港股相关监管政策
 - 使用繁体中文
 - 如无重要事件，输出"• 暫無重要宏觀動態"
@@ -524,7 +545,7 @@ def refine_macro_news(
     manual_items: list[str] = None,
 ) -> str:
     """
-    将宏观新闻列表 → LLM → 3-5条中文要点摘要。
+    将宏观新闻列表 → LLM → 最多3条中文要点摘要。
     manual_items: 人工精选宏观内容，优先级最高，全部保留，不经重要性过滤。
     返回格式化的第三部分文本块，或降级纯文本摘要。
     """
@@ -559,8 +580,7 @@ def refine_macro_news(
         + "\n\n輸出規則：\n"
         + "1. 人工精選條目必須全部輸出（不過濾、不省略）\n"
         + "2. 自動抓取條目：正常過濾，若與人工精選描述同一事件，丟棄自動抓取版本\n"
-        + f"3. 合併後輸出3-{max(6, len(manual_items) + 3)}條要點"
-        + "（繁體中文，每條以'• '開頭）："
+        + "3. 合併後輸出不超過3條要點（繁體中文，每條以'• '開頭）"
     )
 
     messages = [
