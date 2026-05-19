@@ -259,6 +259,77 @@ def send_telegram(text: str, token: str, chat_id: str, chunk_size: int = 3800):
             raise
 
 
+
+# ─────────────────────────────────────────────
+# 人工输入合并 / 搜索任务识别
+# ─────────────────────────────────────────────
+
+EARNINGS_KEYWORDS = (
+    "业绩", "業績", "财报", "財報", "年报", "年報", "中报", "中報",
+    "季报", "季報", "results", "earnings", "annual", "interim",
+)
+SEARCH_INTENT_KEYWORDS = (
+    "查", "搜", "搜索", "核查", "看看", "留意", "关注", "關注", "提醒",
+    "是否", "有没有", "有无", "有冇", "可能", "应该", "應該", "發", "发",
+)
+
+
+def _is_earnings_search_request(text: str) -> bool:
+    """识别“请去查业绩”类人工提醒，避免把提醒原文直接写入日报。"""
+    lowered = (text or "").lower()
+    has_earnings = any(keyword.lower() in lowered for keyword in EARNINGS_KEYWORDS)
+    has_search_intent = any(keyword.lower() in lowered for keyword in SEARCH_INTENT_KEYWORDS)
+    return has_earnings and has_search_intent
+
+
+def _extract_earnings_requests(manual_stock_items: dict) -> tuple[dict, list[dict]]:
+    """
+    从人工个股输入中拆出业绩搜索请求。
+
+    返回：
+    - cleaned_manual：继续交给个股 LLM 的人工事实；
+    - earnings_requests：需要触发豆包业绩搜索的公司列表。
+    """
+    cleaned_manual: dict = {}
+    requests: list[dict] = []
+    seen_companies: set[str] = set()
+
+    for company, items in (manual_stock_items or {}).items():
+        keep_items = []
+        for item in items or []:
+            if _is_earnings_search_request(item):
+                company_key = str(company).strip()
+                if company_key and company_key not in seen_companies:
+                    requests.append({"code": company_key, "name": company_key, "source": "telegram"})
+                    seen_companies.add(company_key)
+                logger.info(f"[ManualInput] 将人工业绩提醒转为搜索任务: {company_key}")
+            else:
+                keep_items.append(item)
+        if keep_items:
+            cleaned_manual[company] = keep_items
+
+    return cleaned_manual, requests
+
+
+def _merge_manual_ipo_section(ipo_section: str, manual_items: list[str]) -> str:
+    """把 Telegram 人工 IPO 输入强制合并进第五部分，避免读入后被主流程忽略。"""
+    manual_items = [item.strip() for item in (manual_items or []) if item and item.strip()]
+    if not manual_items:
+        return ipo_section
+
+    manual_block = "人工補充（Telegram）：\n" + "\n".join(
+        f"• {item}" for item in manual_items
+    )
+
+    empty_markers = ("• 今日暫無新股認購", "• 今日暂无新股认购")
+    if ipo_section and any(marker in ipo_section for marker in empty_markers):
+        header = ipo_section.splitlines()[0]
+        return f"{header}\n{manual_block}"
+
+    if ipo_section:
+        return f"{ipo_section.rstrip()}\n\n{manual_block}"
+    return f"▶️五、*今日招股（新股認購）*\n{manual_block}"
+
 # ─────────────────────────────────────────────
 # 主流程
 # ─────────────────────────────────────────────
@@ -309,6 +380,16 @@ def main():
             logger.warning(f"Step 0: 人工输入读取失败: {e}，继续使用纯自动抓取")
     else:
         logger.info("Step 0: 未配置 TELEGRAM_INPUT_CHANNEL_ID，跳过人工输入")
+
+    # 将“查业绩/是否发业绩”这类人工提醒转为后续搜索任务，避免原文直出日报
+    manual_stock_items, manual_earnings_requests = _extract_earnings_requests(
+        manual_bundle.get("stocks") or {}
+    )
+    manual_bundle["stocks"] = manual_stock_items
+    if manual_earnings_requests:
+        logger.info(
+            f"Step 0: 识别到 {len(manual_earnings_requests)} 条人工业绩搜索任务"
+        )
 
     # ── Step 1: 抓取市场数据 ──────────────────────────────────────────────────
     logger.info("Step 1: 抓取市场数据（结构化 scraper）")
@@ -472,6 +553,10 @@ def main():
             else "▶️五、*今日招股（新股認購）*\n• ⚠️ 數據獲取失敗，請手動補充"
         )
 
+    if manual_bundle.get("ipo"):
+        logger.info(f"Step 2b: 合并人工 IPO 输入 {len(manual_bundle['ipo'])} 条")
+        ipo_section = _merge_manual_ipo_section(ipo_section, manual_bundle.get("ipo"))
+
     # ── Step 2c: 豆包回购查询 ─────────────────────────────────────────────────
     # 豆包搜索全港 24h 回购 → Python 匹配 watchlist → 格式化子段落
     # 百胜中国（T+2 披露惯例）单独 48h 查询，合并进结果
@@ -515,8 +600,81 @@ def main():
         except Exception as e:
             logger.error(f"豆包回购模块异常: {e}")
 
-    # ── Step 2d: 抓取个股新闻 ─────────────────────────────────────────────────
-    logger.info("Step 2d: 抓取个股新闻")
+    # ── Step 2d: 业绩公告查询 ─────────────────────────────────────────────────
+    # 固定 watchlist 扫描 + Telegram 指定公司搜索；人工“查业绩”提醒不直接进日报。
+    earnings_subsection = ""
+    doubao_earnings_available = bool(os.environ.get("ARK_API_KEY") and (
+        os.environ.get("DOUBAO_BOT_EARNINGS") or os.environ.get("DOUBAO_BOT_MACRO")
+    ))
+
+    if doubao_earnings_available:
+        logger.info("Step 2d: 豆包 API 查询 watchlist 业绩公告")
+        from fetchers.doubao_macro import (
+            fetch_doubao_earnings_watchlist,
+            fetch_doubao_earnings_detail,
+            fmt_earnings_subsection,
+        )
+        from fetchers.stock_news import HK_STOCKS
+
+        try:
+            def _resolve_manual_earnings_requests(requests: list[dict]) -> list[dict]:
+                resolved = []
+                seen = set()
+                by_name = {name: code for code, name in HK_STOCKS.items()}
+                by_simplified_name = {
+                    name.replace("騰", "腾").replace("業", "业"): code
+                    for code, name in HK_STOCKS.items()
+                }
+                for req in requests:
+                    raw_key = str(req.get("code") or req.get("name") or "").strip()
+                    code = raw_key.zfill(4) if raw_key.isdigit() else ""
+                    name = raw_key
+                    if code and code in HK_STOCKS:
+                        name = HK_STOCKS[code]
+                    elif raw_key in by_name:
+                        code = by_name[raw_key]
+                        name = raw_key
+                    elif raw_key in by_simplified_name:
+                        code = by_simplified_name[raw_key]
+                        name = HK_STOCKS[code]
+                    dedup_key = code or name
+                    if dedup_key and dedup_key not in seen:
+                        resolved.append({"code": code, "name": name})
+                        seen.add(dedup_key)
+                return resolved
+
+            earnings_parts = []
+            manual_targets = _resolve_manual_earnings_requests(manual_earnings_requests)
+            if manual_targets:
+                logger.info(f"[DoubaoEarnings] 人工触发业绩详情搜索 {len(manual_targets)} 只")
+                manual_earnings = fetch_doubao_earnings_detail(
+                    manual_targets,
+                    date_hkt=now_hkt,
+                )
+                if manual_earnings:
+                    earnings_parts.append(manual_earnings)
+
+            watchlist_earnings = fetch_doubao_earnings_watchlist(HK_STOCKS, date_hkt=now_hkt)
+            if watchlist_earnings:
+                earnings_parts.append(watchlist_earnings)
+
+            if earnings_parts:
+                # 用分隔线交给已有 formatter，避免多处重复标题。
+                earnings_subsection = fmt_earnings_subsection("\n---\n".join(earnings_parts))
+                logger.info(f"[DoubaoEarnings] 业绩段落生成成功，共 {len(earnings_parts)} 组结果")
+            elif manual_targets:
+                names = "、".join(item["name"] for item in manual_targets)
+                earnings_subsection = f"**業績核查**\n• 已收到 {names} 業績提醒，但未查到可驗證公告；請手動覆核"
+                logger.info("[DoubaoEarnings] 人工触发但未查到可验证公告")
+        except Exception as e:
+            logger.error(f"豆包业绩模块异常: {e}")
+    elif manual_earnings_requests:
+        names = "、".join(str(item.get("name") or item.get("code")) for item in manual_earnings_requests)
+        earnings_subsection = f"**業績核查**\n• 已收到 {names} 業績提醒，但未配置豆包搜索；請手動覆核"
+        logger.warning("Step 2d: 有人工业绩提醒，但未配置豆包业绩搜索")
+
+    # ── Step 2e: 抓取个股新闻 ─────────────────────────────────────────────────
+    logger.info("Step 2e: 抓取个股新闻")
     try:
         from fetchers.stock_news import fetch_all_stock_news
         all_news = fetch_all_stock_news(request_interval=1.5)
@@ -539,11 +697,14 @@ def main():
 
     # ── Step 4: 生成早报 ──────────────────────────────────────────────────────
     logger.info("Step 4: 生成早报文本")
+    stock_prefix_subsection = "\n\n".join(
+        part for part in [earnings_subsection, buyback_subsection] if part
+    )
     brief_text = build_brief(
         market_data, stock_sections, now_hkt,
         macro_section=macro_section,
         ipo_section=ipo_section,
-        buyback_subsection=buyback_subsection,
+        buyback_subsection=stock_prefix_subsection,
     )
 
     # ── Step 5: 保存到文件 ────────────────────────────────────────────────────

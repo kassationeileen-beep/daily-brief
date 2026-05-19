@@ -960,10 +960,15 @@ def fetch_doubao_earnings_detail(
         date_hkt = datetime.now(HKT)
 
     date_str = date_hkt.strftime("%Y年%m月%d日")
-    companies = "\n".join(
-        f"- {s['name']}（{s['code'].zfill(4)}.HK）"
-        for s in triggered_stocks
-    )
+
+    def _fmt_company(s: dict) -> str:
+        code = str(s.get("code", "")).strip()
+        name = str(s.get("name", code)).strip() or code
+        if code.isdigit():
+            return f"- {name}（{code.zfill(4)}.HK）"
+        return f"- {name}"
+
+    companies = "\n".join(_fmt_company(s) for s in triggered_stocks)
     user_prompt = _USER_EARNINGS_DETAIL.format(date=date_str, companies=companies)
 
     try:
