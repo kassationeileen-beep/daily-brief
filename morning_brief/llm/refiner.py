@@ -170,7 +170,7 @@ def filter_fresh_news(news_items: list[dict], days: int = NEWS_FRESHNESS_DAYS) -
     """
     过滤掉超过 days 天前的新闻。
     - 能解析日期：按日期过滤
-    - 无法解析日期：标记为"日期未知"并保留，交由 LLM 根据内容判断
+    - 无法解析日期：默认丢弃（减少旧闻重复）；可在调试时放宽
     """
     cutoff = datetime.now().astimezone() - timedelta(days=days)
     cutoff_naive = cutoff.replace(tzinfo=None)
@@ -179,11 +179,7 @@ def filter_fresh_news(news_items: list[dict], days: int = NEWS_FRESHNESS_DAYS) -
         raw_time = item.get("time", "")
         dt = _parse_news_date(raw_time)
         if dt is None:
-            # 无法解析日期：标记后保留，让 LLM 凭内容判断
-            item = dict(item)
-            item["time"] = f"日期未知（原始：{raw_time[:30]}）" if raw_time else "日期未知"
-            fresh.append(item)
-            logger.debug(f"  [日期解析失败] {raw_time!r} → 保留，交LLM判断")
+            logger.debug(f"  [日期解析失败] {raw_time!r} → 丢弃，避免旧闻复播")
             continue
         dt_naive = dt.replace(tzinfo=None) if dt.tzinfo else dt
         if dt_naive >= cutoff_naive:

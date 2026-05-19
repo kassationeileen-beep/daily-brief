@@ -79,6 +79,21 @@ US_STOCKS = {
 }
 
 
+def _dedupe_news_items(news: list[dict]) -> list[dict]:
+    """按 标题+时间 做本地去重，减少源侧重复条目。"""
+    deduped = []
+    seen = set()
+    for item in news or []:
+        title = str(item.get("title", "")).strip().lower()
+        t = str(item.get("time", "")).strip()
+        key = (title[:120], t[:25])
+        if not title or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 # ─────────────────────────────────────────────
 # 港股新闻（东方财富）
 # ─────────────────────────────────────────────
@@ -322,6 +337,7 @@ def fetch_all_stock_news(request_interval: float = 1.5) -> dict:
         if not news:
             logger.debug(f"[{code}] 主接口无数据，尝试备用")
             news = fetch_hk_news_alt(code, name)
+        news = _dedupe_news_items(news)
         result["hk"][code] = {"name": name, "news": news}
         logger.debug(f"  {code} {name}: {len(news)} 条")
         time.sleep(request_interval)
@@ -329,6 +345,7 @@ def fetch_all_stock_news(request_interval: float = 1.5) -> dict:
     logger.info(f"抓取A股新闻（{len(A_STOCKS)} 只）...")
     for code, name in A_STOCKS.items():
         news = fetch_a_news(code, name)
+        news = _dedupe_news_items(news)
         result["a"][code] = {"name": name, "news": news}
         logger.debug(f"  {code} {name}: {len(news)} 条")
         time.sleep(request_interval)
@@ -336,6 +353,7 @@ def fetch_all_stock_news(request_interval: float = 1.5) -> dict:
     logger.info(f"抓取美股新闻（{len(US_STOCKS)} 只）...")
     for ticker, name in US_STOCKS.items():
         news = fetch_us_news(ticker, name)
+        news = _dedupe_news_items(news)
         result["us"][ticker] = {"name": name, "news": news}
         logger.debug(f"  {ticker} {name}: {len(news)} 条")
         time.sleep(0.5)
