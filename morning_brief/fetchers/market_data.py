@@ -94,6 +94,18 @@ def fetch_hsi() -> dict:
         if result["close"] is None:
             result["error"] = str(e)
 
+    # ── 成交额备1：yfinance 成交量 × 近似均价（仅作兜底） ──────────────────────
+    if result["turnover_hkd_100m"] is None and yf_avg_price is not None:
+        try:
+            # yfinance Volume 为股数，乘均价得港元成交额，再换算为亿港元
+            vol = float(row.get("Volume", 0) or 0)
+            est = vol * yf_avg_price / 1e8
+            if est > 0:
+                result["turnover_hkd_100m"] = round(est, 2)
+                logger.info(f"[HSI-yf-est] 成交额估算: {result['turnover_hkd_100m']} 亿港元")
+        except Exception:
+            pass
+
     # ── 成交额备2：爬 HKEX 官方市场统计页（新加坡等境外IP可访问）──────────────
     if result["turnover_hkd_100m"] is None:
         try:
