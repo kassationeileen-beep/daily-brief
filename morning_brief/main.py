@@ -275,7 +275,7 @@ SEARCH_INTENT_KEYWORDS = (
 
 
 def _is_earnings_search_request(text: str) -> bool:
-    """识别“请去查业绩”类人工提醒，避免把提醒原文直接写入日报。"""
+    """识别"请去查业绩"类人工提醒，避免把提醒原文直接写入日报。"""
     lowered = (text or "").lower()
     has_earnings = any(keyword.lower() in lowered for keyword in EARNINGS_KEYWORDS)
     has_search_intent = any(keyword.lower() in lowered for keyword in SEARCH_INTENT_KEYWORDS)
@@ -382,7 +382,7 @@ def main():
     else:
         logger.info("Step 0: 未配置 TELEGRAM_INPUT_CHANNEL_ID，跳过人工输入")
 
-    # 将“查业绩/是否发业绩”这类人工提醒转为后续搜索任务，避免原文直出日报
+    # 将"查业绩/是否发业绩"这类人工提醒转为后续搜索任务，避免原文直出日报
     manual_stock_items, manual_earnings_requests = _extract_earnings_requests(
         manual_bundle.get("stocks") or {}
     )
@@ -443,18 +443,35 @@ def main():
         except Exception as e:
             logger.warning(f"豆包资金动态补充失败: {e}，使用 scraper 原始数据")
 
-    # ── Step 2a: 豆包宏观（优先） ─────────────────────────────────────────────
-    # 若配置了 ARK_API_KEY + DOUBAO_BOT_MACRO*，则用豆包直接生成宏观段落；
-    # 否则（或豆包失败）降级到 RSS + LLM 方案。
+    # ── Step 2a: 宏观要闻（优先级：金十早餐 → 豆包 → RSS+LLM）────────────────
     macro_section = None
+
+    # 优先：金十财经早餐（无 LLM 幻觉，结构化，每日 07:00 更新）
+    logger.info("Step 2a: 金十财经早餐抓取")
+    try:
+        from fetchers.jin10_breakfast import fetch_jin10_breakfast
+        macro_section = fetch_jin10_breakfast(date_hkt=now_hkt)
+        if macro_section:
+            logger.info("[Jin10Breakfast] 宏观段落生成成功")
+        else:
+            logger.warning("[Jin10Breakfast] 未取到内容，降级到豆包")
+    except Exception as e:
+        logger.error(f"金十早餐模块异常: {e}，降级到豆包")
+
+    # 注入人工精选宏观条目（追加到金十段落底部）
+    if macro_section and manual_bundle.get("macro"):
+        manual_lines = "\n".join(f"• {item}" for item in manual_bundle["macro"])
+        macro_section = f"{macro_section}\n\n🔸人工補充\n{manual_lines}"
+
+    # 备用：豆包 API（有联网搜索但可能幻觉，仅在金十失败时使用）
     doubao_available = bool(os.environ.get("ARK_API_KEY") and (
         os.environ.get("DOUBAO_BOT_MACRO") or
         os.environ.get("DOUBAO_BOT_MACRO_CN") or
         os.environ.get("DOUBAO_BOT_MACRO_GLOBAL")
     ))
 
-    if doubao_available:
-        logger.info("Step 2a: 豆包 API 拉取宏观要闻（中国 + 全球）")
+    if macro_section is None and doubao_available:
+        logger.info("Step 2a (降级): 豆包 API 拉取宏观要闻")
         try:
             from fetchers.doubao_macro import (
                 fetch_doubao_macro_cn,
@@ -464,16 +481,15 @@ def main():
             cn_text = fetch_doubao_macro_cn(date_hkt=now_hkt)
             global_text = fetch_doubao_macro_global(date_hkt=now_hkt)
             macro_section = build_doubao_macro_section(cn_text, global_text, date_hkt=now_hkt)
-            if macro_section:
-                logger.info("[DoubaoMacro] 宏观段落生成成功，跳过 RSS+LLM 方案")
-            else:
-                logger.warning("[DoubaoMacro] 中国/全球宏观均失败，降级到 RSS+LLM")
+            if macro_section and manual_bundle.get("macro"):
+                manual_lines = "\n".join(f"• {item}" for item in manual_bundle["macro"])
+                macro_section = f"{macro_section}\n\n🔸人工補充\n{manual_lines}"
         except Exception as e:
             logger.error(f"豆包宏观模块异常: {e}，降级到 RSS+LLM")
 
     if macro_section is None:
-        # 降级：RSS 抓取 + LLM 提炼（含人工精选注入）
-        logger.info("Step 2a (降级): 抓取宏观 RSS + LLM 提炼")
+        # 最终降级：RSS 抓取 + LLM 提炼
+        logger.info("Step 2a (最终降级): 抓取宏观 RSS + LLM 提炼")
         try:
             from fetchers.macro_news import fetch_macro_news
             macro_news_items = fetch_macro_news()
@@ -488,25 +504,7 @@ def main():
             )
         except Exception as e:
             logger.error(f"宏观LLM提炼失败: {e}")
-            macro_section = "▶️三、*宏觀及行業動態*\n• ⚠️ LLM提炼失败，请手动补充"
-    elif manual_bundle.get("macro"):
-        # Doubao 已生成宏观段落，但仍有人工精选 → 追加到段落顶部
-        logger.info("Step 2a: 将人工精选宏观注入 Doubao 生成的段落")
-        try:
-            from llm.refiner import refine_macro_news
-            # 仅用人工条目调用一次 LLM 格式化，再前插到 Doubao 结果
-            manual_only_section = refine_macro_news(
-                [],
-                manual_items=manual_bundle.get("macro"),
-            )
-            # manual_only_section 格式: "▶️三、*...*\n• ..."
-            # 取 Doubao 段落的 header 行保留，bullets 合并
-            doubao_bullets = "\n".join(macro_section.splitlines()[1:])
-            manual_bullets = "\n".join(manual_only_section.splitlines()[1:])
-            header = macro_section.splitlines()[0]
-            macro_section = f"{header}\n{manual_bullets}\n{doubao_bullets}"
-        except Exception as e:
-            logger.warning(f"人工宏观注入失败: {e}，保留 Doubao 原始结果")
+            macro_section = "▶️三、*宏觀及行業動態*\n• ⚠️ 數據獲取失敗，請手動補充"
 
     # ── Step 2b: 今日招股 ─────────────────────────────────────────────────────
     # 豆包优先（信息更丰富）→ 爬虫备用
@@ -559,10 +557,10 @@ def main():
         ipo_section = _merge_manual_ipo_section(ipo_section, manual_bundle.get("ipo"))
 
     # Step 2c: 回购查询已移除（不在日报中独立汇报）
-    buyback_subsection = “”
+    buyback_subsection = ""
 
     # Step 2d: 业绩查询已移除（不在日报中独立汇报）
-    earnings_subsection = “”
+    earnings_subsection = ""
 
     # ── Step 2e: 抓取个股新闻 ─────────────────────────────────────────────────
     logger.info("Step 2e: 抓取个股新闻")
