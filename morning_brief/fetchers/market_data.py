@@ -40,47 +40,27 @@ def _safe(fn, label: str):
 
 def fetch_hsi() -> dict:
     """恒生指数：收盘价、涨跌幅、成交额（亿港元）
-    收盘价主：yfinance ^HSI（海外服务器稳定）
-    成交额主：akshare stock_hk_index_daily_em（需能访问东方财富，海外IP可能超时）
-    成交额备：yfinance regularMarketVolume × 近似均价（粗估，误差约5-15%）
+    收盘价主：akshare stock_hk_index_daily_em（东方财富港股指数）
+    收盘价备：yfinance ^HSI
+    成交额备：yfinance 成交量 × 均价（粗估）、HKEX 官方页面
     """
     result = {"close": None, "pct": None, "turnover_hkd_100m": None, "error": None}
 
-    # ── 收盘价：yfinance ──────────────────────────────────────────────────────
-    yf_avg_price = None   # 用于备用成交额估算
-    try:
-        import yfinance as yf
-        tk = yf.Ticker("^HSI")
-        hist = tk.history(period="5d")
-        if hist is not None and not hist.empty:
-            row = hist.iloc[-1]
-            close = float(row["Close"])
-            prev = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
-            pct = (close - prev) / prev * 100
-            yf_avg_price = (float(row["High"]) + float(row["Low"])) / 2
-            result.update({"close": round(close, 2), "pct": round(pct, 2)})
-            logger.debug(f"[HSI] yfinance 收盘: {close:.2f}")
-    except Exception as e:
-        logger.warning(f"[HSI-yfinance] {e}")
-
-    # ── 成交额主：akshare stock_hk_index_daily_em ─────────────────────────────
-    # 注：海外IP访问东方财富可能超时，失败时自动降级到备用方案
+    # ── 收盘价主：akshare stock_hk_index_daily_em ─────────────────────────────
     try:
         import akshare as ak
         df = _timed(lambda: ak.stock_hk_index_daily_em(symbol="恒生指数"), "HSI-akshare")
         if df is not None and not df.empty:
             row = df.iloc[-1]
             logger.debug(f"[HSI-akshare] 列名: {list(df.columns)}")
-            # 若 yfinance 未取到收盘价则补充
-            if result["close"] is None:
-                for cname in ["收盘", "close", "Close"]:
-                    if cname in df.columns:
-                        close = float(row[cname])
-                        prev = float(df.iloc[-2][cname]) if len(df) > 1 else close
-                        result["close"] = round(close, 2)
-                        result["pct"] = round((close - prev) / prev * 100, 2)
-                        break
-            # 成交额
+            for cname in ["收盘", "close", "Close"]:
+                if cname in df.columns:
+                    close = float(row[cname])
+                    prev = float(df.iloc[-2][cname]) if len(df) > 1 else close
+                    result["close"] = round(close, 2)
+                    result["pct"] = round((close - prev) / prev * 100, 2)
+                    logger.info(f"[HSI-akshare] 收盘: {close:.2f} ({result['pct']:+.2f}%)")
+                    break
             for cname in ["成交额", "amount", "Amount", "turnover", "Turnover"]:
                 if cname in df.columns:
                     raw = float(row[cname])
@@ -90,9 +70,27 @@ def fetch_hsi() -> dict:
                     logger.debug(f"[HSI-akshare] 成交额 raw={raw} → {result['turnover_hkd_100m']} 亿港元")
                     break
     except Exception as e:
-        logger.warning(f"[HSI-akshare] 失败（海外IP访问东方财富超时属正常）: {e}")
-        if result["close"] is None:
-            result["error"] = str(e)
+        logger.warning(f"[HSI-akshare] 失败: {e}")
+
+    # ── 收盘价备：yfinance ^HSI ───────────────────────────────────────────────
+    yf_avg_price = None
+    if result["close"] is None:
+        try:
+            import yfinance as yf
+            tk = yf.Ticker("^HSI")
+            hist = tk.history(period="5d")
+            if hist is not None and not hist.empty:
+                row = hist.iloc[-1]
+                close = float(row["Close"])
+                prev = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
+                pct = (close - prev) / prev * 100
+                yf_avg_price = (float(row["High"]) + float(row["Low"])) / 2
+                result.update({"close": round(close, 2), "pct": round(pct, 2)})
+                logger.info(f"[HSI-yfinance] 收盘: {close:.2f}")
+        except Exception as e:
+            logger.warning(f"[HSI-yfinance] {e}")
+            if result["close"] is None:
+                result["error"] = str(e)
 
     # ── 成交额备1：yfinance 成交量 × 近似均价（仅作兜底） ──────────────────────
     if result["turnover_hkd_100m"] is None and yf_avg_price is not None:
@@ -321,12 +319,17 @@ def fetch_a_share_indices() -> dict:
 def fetch_nikkei225() -> dict:
     """日经225：收盘价、涨跌幅、成交量（亿股）
     注：yfinance ^N225 Volume 通常为0，此时 volume_100m 保留为 None（供手动补充）
+    使用显式 start/end 日期而非 period="5d"，避免 yfinance 缓存返回错误日期的数据。
     """
     import yfinance as yf
+    from datetime import date as date_type, timedelta as td
     result = {"close": None, "pct": None, "volume_100m": None, "error": None}
     try:
         tk = yf.Ticker("^N225")
-        hist = tk.history(period="5d")
+        # 向前取14天确保覆盖节假日，end 多加1天保证当日数据被包含在范围内
+        end = (date_type.today() + td(days=1)).strftime("%Y-%m-%d")
+        start = (date_type.today() - td(days=14)).strftime("%Y-%m-%d")
+        hist = tk.history(start=start, end=end)
         if hist.empty:
             raise ValueError("空数据")
         row = hist.iloc[-1]
@@ -334,6 +337,11 @@ def fetch_nikkei225() -> dict:
         prev = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
         pct = (close - prev) / prev * 100
         volume = float(row.get("Volume", 0) or 0)
+        try:
+            actual_date = hist.index[-1].date()
+        except Exception:
+            actual_date = hist.index[-1]
+        logger.info(f"[N225] 收盘: {close:.2f} ({pct:+.2f}%) 数据日期: {actual_date}")
         result.update({
             "close": round(close, 2),
             "pct": round(pct, 2),
