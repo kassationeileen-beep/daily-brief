@@ -6,7 +6,8 @@ telegram_input.py — 从 Telegram 频道读取人工精选输入
 支持消息格式：
   - 直接发布/粘贴的新闻文本（含 #标签 分类）
   - 转发消息（取 caption 或转发正文）
-  - 支持 #宏观/#macro、#ipo/#新股、#0700/#腾讯/#TSLA 等标签
+  - 推荐标签格式：港股用 #四位代码（#0700），美股用 #大写ticker（#NVDA），A股用 #六位代码
+  - 兼容中文公司名标签（#騰訊/#腾讯），自动归一到代码，避免繁简重复
 """
 import json
 import logging
@@ -36,6 +37,73 @@ _CN_NAME_RE = re.compile(r"#([\u4e00-\u9fff]{2,8})")
 _KNOWN_NON_COMPANY = MACRO_TAGS | IPO_TAGS | STOCKS_GENERIC_TAGS | {
     "#A股", "#港股", "#美股", "#行业", "#行業",
 }
+
+# ── 公司名 → 代码归一化 ──────────────────────────────────────────────────────
+# 中文名（简体/繁体）→ 标准代码（港股4位、美股ticker、A股6位）
+_CN_TO_CODE: dict[str, str] = {
+    # 港股
+    "騰訊": "0700", "腾讯": "0700",
+    "阿里巴巴": "9988",
+    "美團": "3690", "美团": "3690",
+    "小米集團": "1810", "小米集团": "1810", "小米": "1810",
+    "快手": "1024",
+    "比亞迪": "1211", "比亚迪": "1211",
+    "吉利汽車": "0175", "吉利汽车": "0175", "吉利": "0175",
+    "中國移動": "0941", "中国移动": "0941",
+    "港交所": "0388",
+    "友邦保險": "1299", "友邦保险": "1299", "友邦": "1299",
+    "中國平安": "2318", "中国平安": "2318", "平安": "2318",
+    "招商銀行": "3968", "招商银行": "3968", "招行": "3968",
+    "中國銀行": "3988", "中国银行": "3988",
+    "農夫山泉": "9633", "农夫山泉": "9633",
+    "寧德時代": "3750", "宁德时代": "3750", "寧德": "3750", "宁德": "3750",
+    "攜程集團": "9961", "携程集团": "9961", "攜程": "9961", "携程": "9961",
+    "百勝中國": "9987", "百胜中国": "9987",
+    "安踏": "2020",
+    "李寧": "2331", "李宁": "2331",
+    "申洲國際": "2313", "申洲国际": "2313",
+    "華潤啤酒": "0291", "华润啤酒": "0291",
+    "華潤電力": "0836", "华润电力": "0836",
+    "華潤置地": "1109", "华润置地": "1109",
+    "中海外": "0688", "中國海外": "0688", "中国海外": "0688",
+    "龍湖": "0960", "龙湖": "0960",
+    "綠城": "3900", "绿城": "3900",
+    "舜宇光學": "2382", "舜宇光学": "2382", "舜宇": "2382",
+    "創科實業": "0669", "创科实业": "0669", "創科": "0669", "创科": "0669",
+    "信義玻璃": "0868", "信义玻璃": "0868",
+    "福耀玻璃": "3606",
+    "中石油": "0857",
+    "中遠海能": "1138", "中远海能": "1138",
+    "港鐵": "0066", "港铁": "0066",
+    "新東方": "9901", "新东方": "9901",
+    "商湯": "0020", "商汤": "0020",
+    "海爾智家": "6690", "海尔智家": "6690",
+    "美的集團": "0300", "美的集团": "0300", "美的": "0300",
+    "中國中免": "1880", "中国中免": "1880",
+    # A股
+    "茅台": "600519", "貴州茅台": "600519", "贵州茅台": "600519",
+    # 美股
+    "蘋果": "AAPL", "苹果": "AAPL",
+    "微軟": "MSFT", "微软": "MSFT",
+    "谷歌": "GOOGL",
+    "亞馬遜": "AMZN", "亚马逊": "AMZN",
+    "英偉達": "NVDA", "英伟达": "NVDA",
+    "特斯拉": "TSLA",
+    "英特爾": "INTC", "英特尔": "INTC",
+    "Meta": "META",
+}
+
+
+def _normalize_company(raw: str) -> str:
+    """归一化 company tag 到标准代码。
+    - 数字串：港股补到4位，A股补到6位
+    - 英文 ticker：保持大写（正则已保证）
+    - 中文名：反查 _CN_TO_CODE，查不到保留原值
+    """
+    if raw.isdigit():
+        stripped = raw.lstrip("0") or "0"
+        return stripped.zfill(4) if len(stripped) <= 4 else stripped.zfill(6)
+    return _CN_TO_CODE.get(raw, raw)
 
 
 # ── Offset 管理 ──────────────────────────────────────────────────────────────
@@ -156,9 +224,9 @@ def _parse_message(text: str) -> dict:
             if t.lower() in lower:
                 section = "ipo"
 
-        # 港股代码 #0700 → "0700"
+        # 港股代码 #0700 / #00700 → 归一化4位
         for m in _HK_CODE_RE.findall(line):
-            company_tags.append(m)
+            company_tags.append(_normalize_company(m))
             if section not in ("macro", "ipo"):
                 section = "stocks"
 
@@ -170,11 +238,11 @@ def _parse_message(text: str) -> dict:
                 if section not in ("macro", "ipo"):
                     section = "stocks"
 
-        # 中文公司名标签
+        # 中文公司名标签 → 反查代码，简繁通吃
         for m in _CN_NAME_RE.findall(line):
             full = f"#{m}"
             if full not in _KNOWN_NON_COMPANY:
-                company_tags.append(m)
+                company_tags.append(_normalize_company(m))
                 if section not in ("macro", "ipo"):
                     section = "stocks"
 
@@ -186,13 +254,19 @@ def _parse_message(text: str) -> dict:
     # 清理正文：删除纯标签行，保留内容行
     content_lines = []
     for line in lines:
-        # 去掉行内所有 #tag 后检查是否还有实质内容
         without_tags = re.sub(r"#[\w\u4e00-\u9fff]+", "", line).strip()
         if without_tags:
             content_lines.append(line.strip())
     content = "\n".join(content_lines).strip() or text
 
-    company = company_tags[0] if company_tags else None
+    # 去重：同一条消息里多个标签可能归一到同一代码（如 #0700 #騰訊）
+    seen_tags: set[str] = set()
+    deduped_tags: list[str] = []
+    for tag in company_tags:
+        if tag not in seen_tags:
+            seen_tags.add(tag)
+            deduped_tags.append(tag)
+    company = deduped_tags[0] if deduped_tags else None
 
     return {
         "section": section or "unclassified",

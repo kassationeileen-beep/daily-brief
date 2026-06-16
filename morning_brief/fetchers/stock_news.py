@@ -1,14 +1,37 @@
 """
 stock_news.py — 第四部分：个股新闻抓取
-港股：东方财富个股新闻 API
+港股：Futu AI 新闻 API（主）→ Yahoo RSS（兜底）
 A股：akshare stock_news_em
-美股：Yahoo Finance RSS (feedparser)
+美股：Futu AI 新闻 API（主）→ Yahoo RSS（兜底）
 """
+import re
 import time
 import logging
+from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# 预过滤：在送 LLM 前拦截明显噪音
+# ─────────────────────────────────────────────
+
+_NOISE_PATTERNS = [
+    re.compile(p) for p in [
+        # 大行「维持/維持」评级/目标价：无变化、无新信息，纯噪音
+        # 上调/下调评级或目标价有信息量，不在此过滤
+        r"[维維][持持].{0,8}(评级|評級|买入|買入|卖出|賣出|中性|持有|目[标標][价價])",
+        r"(里昂|匯豐|汇丰|摩根|高盛|美[銀银]|花旗|德[銀银]|瑞[銀银]|瑞信|野村|[麥麦]格理|大摩|小摩).{0,15}[维維][持持].{0,8}(评级|評級|买入|買入|卖出|賣出|中性|持有|目[标標])",
+        r"《大行》.{0,30}[维維][持持]",   # 《大行》标签 + 维持
+        # 纯指数涨跌（非公司层面）
+        r"(恒指|港股|[滬沪]指|深指|恒生指[數数]).{0,15}([高低](開|开)|收[升跌漲涨]|ADR|[預预][計计])",
+        r"港股ADR",
+    ]
+]
+
+
+def _is_noise(title: str) -> bool:
+    return any(p.search(title) for p in _NOISE_PATTERNS)
 
 # ─────────────────────────────────────────────
 # Watchlist
@@ -80,18 +103,67 @@ US_STOCKS = {
 
 
 def _dedupe_news_items(news: list[dict]) -> list[dict]:
-    """按 标题+时间 做本地去重，减少源侧重复条目。"""
+    """去重 + 预过滤噪音（大行评级、纯指数涨跌）。"""
     deduped = []
     seen = set()
     for item in news or []:
-        title = str(item.get("title", "")).strip().lower()
-        t = str(item.get("time", "")).strip()
-        key = (title[:120], t[:25])
-        if not title or key in seen:
+        title = str(item.get("title", "")).strip()
+        if not title or _is_noise(title):
+            continue
+        key = (title.lower()[:120], str(item.get("time", "")).strip()[:25])
+        if key in seen:
             continue
         seen.add(key)
         deduped.append(item)
     return deduped
+
+
+# ─────────────────────────────────────────────
+# Futu AI 新闻 API（无需 OpenD）
+# ─────────────────────────────────────────────
+
+def fetch_futu_news(keyword: str, size: int = 10, lang: str = "zh-HK") -> list[dict]:
+    """
+    调用 https://ai-news-search.futunn.com/news_search
+    keyword: 港股用代码（"0700"），美股用 ticker（"NVDA"）
+    返回与 fetch_hk_news / fetch_us_news 相同结构的列表。
+    """
+    import requests
+    try:
+        resp = requests.get(
+            "https://ai-news-search.futunn.com/news_search",
+            params={
+                "keyword": keyword,
+                "size": size,
+                "news_type": 1,
+                "sort_type": 2,
+                "lang": lang,
+            },
+            headers={"User-Agent": "futunn-news-search/0.0.2 (Skill)"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            logger.debug(f"[Futu/{keyword}] API code={data.get('code')} msg={data.get('message')}")
+            return []
+        items = data.get("data") or []
+        news = []
+        for item in items:
+            title = re.sub(r"<[^>]+>", "", item.get("title", "")).strip()
+            if not title:
+                continue
+            ts = item.get("publish_time", "")
+            try:
+                time_str = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                time_str = str(ts)
+            news.append({"title": title, "content": "", "time": time_str})
+        logger.debug(f"[Futu/{keyword}] {len(news)} 条")
+        return news
+    except Exception as e:
+        logger.debug(f"[Futu/{keyword}] 请求失败: {e}")
+        return []
 
 
 # ─────────────────────────────────────────────
@@ -125,14 +197,21 @@ def fetch_hk_news_yahoo(code: str, name: str, max_items: int = 10) -> list[dict]
 
 def fetch_hk_news(code: str, name: str, max_items: int = 10) -> list[dict]:
     """
-    港股新闻：Yahoo Finance RSS 主，东方财富 API 备
+    港股新闻：Futu AI API 主（与 app 内容一致）→ Yahoo RSS 备 → 东方财富 备
     """
-    # 主：Yahoo Finance（海外稳定）
-    news = fetch_hk_news_yahoo(code, name, max_items)
-    if news:
+    # 主：Futu AI（用股票代码搜索，结果最聚焦）
+    news = fetch_futu_news(code, size=max_items)
+    if len(news) >= 3:
         return news
 
-    # 备：东方财富（可能因海外IP超时）
+    logger.debug(f"[HK/{code}] Futu 不足3条（{len(news)}），降级 Yahoo RSS")
+
+    # 备1：Yahoo Finance RSS
+    news_yahoo = fetch_hk_news_yahoo(code, name, max_items)
+    if news_yahoo:
+        return news_yahoo
+
+    # 备2：东方财富（海外 IP 可能超时）
     import requests
     url = "https://np-listapi.eastmoney.com/comm/web/getListInfo"
     params = {
@@ -223,20 +302,30 @@ def fetch_a_news(code: str, name: str, max_items: int = 10) -> list[dict]:
 # ─────────────────────────────────────────────
 
 def fetch_us_news(ticker: str, name: str, max_items: int = 10) -> list[dict]:
-    """Yahoo Finance RSS"""
+    """
+    美股新闻：Futu AI API 主（中文，与 app 一致）→ Yahoo RSS 备
+    """
+    # 主：Futu AI（ticker 搜索，zh-HK 返回中文内容）
+    news = fetch_futu_news(ticker, size=max_items, lang="zh-HK")
+    if len(news) >= 3:
+        return news
+
+    logger.debug(f"[US/{ticker}] Futu 不足3条（{len(news)}），降级 Yahoo RSS")
+
+    # 备：Yahoo Finance RSS（英文，refiner 会翻译）
     import feedparser
     url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
     try:
         feed = feedparser.parse(url)
-        news = []
+        news_yahoo = []
         for entry in feed.entries[:max_items]:
-            news.append({
+            news_yahoo.append({
                 "title": entry.get("title", ""),
                 "content": entry.get("summary", ""),
                 "time": entry.get("published", ""),
                 "lang": "en",
             })
-        return news
+        return news_yahoo
     except Exception as e:
         logger.warning(f"[美股新闻/{ticker}/{name}] {e}")
         return []
