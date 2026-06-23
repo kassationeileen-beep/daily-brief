@@ -317,35 +317,47 @@ def fetch_a_share_indices() -> dict:
 
 
 def fetch_nikkei225() -> dict:
-    """日经225：收盘价、涨跌幅、成交量（亿股）
-    注：yfinance ^N225 Volume 通常为0，此时 volume_100m 保留为 None（供手动补充）
-    使用显式 start/end 日期而非 period="5d"，避免 yfinance 缓存返回错误日期的数据。
+    """日经225：收盘价、涨跌幅。
+    主：akshare index_global_spot_em（东财全球指数，稳定）
+    备：yfinance ^N225（Volume 固定为0，Futu 亦不支持 JP 指数）
+    成交量不可得，volume_100m 固定为 None。
     """
-    import yfinance as yf
-    from datetime import date as date_type, timedelta as td
     result = {"close": None, "pct": None, "volume_100m": None, "error": None}
+
+    # 主：akshare 东财全球指数实时行情
     try:
+        import akshare as ak
+        df = ak.index_global_spot_em()
+        row = df[df["代码"] == "N225"]
+        if not row.empty:
+            r = row.iloc[0]
+            close = float(r["最新价"])
+            prev  = float(r["昨收价"])
+            pct   = float(r["涨跌幅"])
+            logger.info(f"[N225-akshare] 收盘: {close:.2f} ({pct:+.2f}%) 更新: {r.get('最新行情时间','')}")
+            result.update({"close": round(close, 2), "pct": round(pct, 2)})
+            return result
+    except Exception as e:
+        logger.warning(f"[N225-akshare] {e}")
+
+    # 备：yfinance（显式日期范围避免缓存错误）
+    try:
+        import yfinance as yf
+        from datetime import date as date_type, timedelta as td
         tk = yf.Ticker("^N225")
-        # 向前取14天确保覆盖节假日，end 多加1天保证当日数据被包含在范围内
-        end = (date_type.today() + td(days=1)).strftime("%Y-%m-%d")
+        end   = (date_type.today() + td(days=1)).strftime("%Y-%m-%d")
         start = (date_type.today() - td(days=14)).strftime("%Y-%m-%d")
         hist = tk.history(start=start, end=end)
         if hist.empty:
             raise ValueError("空数据")
-        row = hist.iloc[-1]
+        row  = hist.iloc[-1]
         close = float(row["Close"])
-        prev = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
-        pct = (close - prev) / prev * 100
-        volume = float(row.get("Volume", 0) or 0)
-        try:
-            actual_date = hist.index[-1].date()
-        except Exception:
-            actual_date = hist.index[-1]
-        logger.info(f"[N225] 收盘: {close:.2f} ({pct:+.2f}%) 数据日期: {actual_date}")
+        prev  = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
+        pct   = (close - prev) / prev * 100
+        logger.info(f"[N225-yf] 收盘: {close:.2f} ({pct:+.2f}%)")
         result.update({
             "close": round(close, 2),
             "pct": round(pct, 2),
-            "volume_100m": round(volume / 1e8, 4) if volume > 0 else None,
         })
     except Exception as e:
         result["error"] = str(e)
