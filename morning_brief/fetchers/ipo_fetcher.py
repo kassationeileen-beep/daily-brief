@@ -331,13 +331,84 @@ def _fetch_etnet_ipo(today: date) -> list[dict]:
 
 
 # ─────────────────────────────────────────────
+# 主源：Futu OpenD get_ipo_list
+# ─────────────────────────────────────────────
+
+def _fetch_futu_ipo(today: date) -> list[dict]:
+    """
+    通过 Futu OpenD SDK 获取港股 IPO 认购名单。
+    过滤：apply_end_time >= today（认购期尚未结束）。
+    返回字段与其他来源保持一致，name 为英文（由豆包搜索补充中文名）。
+    需要 futu-api Python SDK 且 OpenD 在本地 11111 端口运行。
+    """
+    try:
+        from futu import OpenQuoteContext, Market, RET_OK
+    except ImportError:
+        logger.debug("[IPO-futu] futu SDK 未安装，跳过")
+        return []
+
+    import os
+    host = os.environ.get("FUTU_OPEND_HOST", "127.0.0.1")
+    port = int(os.environ.get("FUTU_OPEND_PORT", "11111"))
+    ctx = None
+    try:
+        ctx = OpenQuoteContext(host=host, port=port)
+        ret, data = ctx.get_ipo_list(Market.HK)
+        if ret != RET_OK or data is None or data.empty:
+            logger.warning(f"[IPO-futu] get_ipo_list 失败: ret={ret}")
+            return []
+
+        today_str = today.isoformat()
+        results = []
+        for _, row in data.iterrows():
+            apply_end = str(row.get("apply_end_time", "") or "").strip()
+            if not apply_end or apply_end == "N/A" or apply_end < today_str:
+                continue  # 认购已截止
+
+            code_raw = str(row.get("code", "")).replace("HK.", "")
+            code_clean = code_raw.lstrip("0") or code_raw
+
+            price_min = float(row.get("ipo_price_min") or 0)
+            price_max = float(row.get("ipo_price_max") or 0)
+            if price_min > 0 and price_max > 0:
+                price_str = (f"{price_min:.2f}" if price_min == price_max
+                             else f"{price_min:.2f}–{price_max:.2f}")
+            else:
+                price_str = "N/A"
+
+            lot = row.get("lot_size")
+            results.append({
+                "code":      code_clean,
+                "name":      str(row.get("name", "")).strip(),
+                "price_hkd": price_str,
+                "sub_start": "",        # Futu 不提供认购开始日，由豆包搜索补充
+                "sub_end":   apply_end,
+                "lot_size":  str(int(lot)) if lot and str(lot) != "N/A" else "",
+                "source":    "futu",
+            })
+
+        logger.info(f"[IPO-futu] 今日认购中: {len(results)} 只")
+        return results
+
+    except Exception as e:
+        logger.warning(f"[IPO-futu] {e}")
+        return []
+    finally:
+        if ctx:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
+
+# ─────────────────────────────────────────────
 # 统一入口
 # ─────────────────────────────────────────────
 
 def fetch_hk_ipo_today(today: Optional[date] = None) -> list[dict]:
     """
     获取今日港股认购新股列表。
-    主: cpy.com.hk → 备1: akshare → 备2: etnet.com.hk → 均失败则返回空列表。
+    主: Futu OpenD → 备1: cpy.com.hk → 备2: akshare → 备3: etnet.com.hk
     """
     if today is None:
         from datetime import timezone, timedelta
@@ -346,12 +417,17 @@ def fetch_hk_ipo_today(today: Optional[date] = None) -> list[dict]:
 
     logger.info(f"[IPO] 抓取今日 ({today}) 认购新股...")
 
-    # 主源
+    # 主源：Futu OpenD（最准确，直接来自交易所数据）
+    ipo_list = _fetch_futu_ipo(today)
+    if ipo_list:
+        return ipo_list
+
+    logger.info("[IPO] Futu 主源失败，尝试 cpy 备源")
     ipo_list = _fetch_cpy_ipo(today)
     if ipo_list:
         return ipo_list
 
-    logger.info("[IPO] cpy 主源失败，尝试 akshare 备源")
+    logger.info("[IPO] cpy 备源失败，尝试 akshare 备源")
     ipo_list = _fetch_akshare_ipo(today)
     if ipo_list:
         return ipo_list
