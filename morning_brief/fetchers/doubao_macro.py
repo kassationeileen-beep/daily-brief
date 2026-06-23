@@ -132,16 +132,16 @@ _DETAIL_BLOCK_FORMAT = """\
 _SYSTEM_IPO = f"""你是服务香港证券从业者的专业金融早报编辑。
 每日早报发布时间：北京时间 07:30。
 
-任务：以下港股新股的代号和认购截止日已由系统确认，请为每只股票补充详细信息，并搜索填入认购起始日。
+任务：以下港股新股的代号和认购截止日已由系统确认，请为每只股票搜索补充详细信息。
 
-【每只股票输出格式】
+【每只股票输出格式（DATES 行必须保留在每块最前面）】
 DATES: 代碼（5位含前導零）|公司名稱（繁體中文）|認購起始日（YYYY-MM-DD）|認購截止日（YYYY-MM-DD）
 {_DETAIL_BLOCK_FORMAT}
 
 【約束】
 - 代碼和認購截止日（第一、四字段）不得修改
-- 公司名稱（第二字段）：若輸入為英文，必須搜索 HKEX 公告找出官方中文名稱并替換
-- 認購起始日（第三字段）：若為空，必須搜索 HKEX 披露易或招股說明書找出起始日期并填入，格式 YYYY-MM-DD
+- 公司名稱（第二字段）：若輸入為英文，搜索 HKEX 公告找出官方中文名稱并填入
+- 認購起始日（第三字段）：搜索找到則填入，找不到則留空
 - 找不到的字段填 N/A，嚴禁使用任何中括號占位符
 - 使用繁體中文；數字保留具體值
 - 不輸出解釋性前言後語"""
@@ -149,7 +149,7 @@ DATES: 代碼（5位含前導零）|公司名稱（繁體中文）|認購起始�
 _USER_IPO = (
     "今天是{date}（北京時間07:30）。以下港股今日在認購期內（代號和截止日由系統確認）：\n\n"
     "{dates_block}\n\n"
-    "請為每只股票：①搜索 HKEX 找出認購起始日及官方中文名稱并填入 DATES 行；②在 DATES 行後補充詳細信息。"
+    "請為每只股票搜索 HKEX 公告補充詳細信息，DATES 行中代碼和截止日保持原樣，中文名稱和起始日有搜到則填入。"
 )
 
 # 獨立搜索模式：爬蟲無數據時，豆包自行搜索（必須輸出 DATES 行以支持首日/續期判斷）
@@ -478,128 +478,66 @@ def parse_market_summary(raw_text: str) -> dict:
 
 
 # ─────────────────────────────────────────────
-# IPO 首日 vs 续期格式化
+# IPO 格式化
 # ─────────────────────────────────────────────
 
 def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
     """
-    根据豆包 IPO 原始输出，按招股首日/续期分别格式化：
-    - 首日（sub_start == today）：保留完整详细信息块
-    - 续期（sub_start < today）：只输出简短提醒
-      "正在招股：\n公司名（XXXXX.HK）：M月D日—M月D日"
-
-    豆包输出每只 IPO 以 DATES 行开头：
-    DATES: 02729|凯乐士科技|2026-03-16|2026-03-19
-    后接详细信息块。
+    将豆包 IPO 原始输出格式化为第五部分。
+    所有在认购期内的新股统一输出完整详情块，去除重复条目。
+    豆包每只 IPO 以 DATES 行开头，后接详细信息。
     """
-    from datetime import date as date_type
     import re
 
     if not doubao_ipo_text:
         return "▶️五、*今日招股（新股認購）*\n• 今日暫無新股認購"
-    if doubao_ipo_text.strip() == "今日無港股新股認購":
+    if doubao_ipo_text.strip() in ("今日無港股新股認購", "今日无港股新股认购"):
         return "▶️五、*今日招股（新股認購）*\n• 今日暫無新股認購"
 
-    if today_date is None:
-        HKT = timezone(timedelta(hours=8))
-        today_date = datetime.now(HKT).date()
-
-    def _parse_date(s: str):
-        """容错日期解析：用正则提取 YYYY-MM-DD，忽略豆包附加的括注或格式噪声"""
-        s = s.strip()
-        m = re.search(r'(\d{4}-\d{2}-\d{2})', s)
-        if m:
-            try:
-                return date_type.fromisoformat(m.group(1))
-            except ValueError:
-                pass
-        m2 = re.search(r'(\d{4})[/.](\d{1,2})[/.](\d{1,2})', s)
-        if m2:
-            try:
-                return date_type(int(m2.group(1)), int(m2.group(2)), int(m2.group(3)))
-            except ValueError:
-                pass
-        return None
-
     # 按 DATES: 行分割各 IPO 块
-    # 每个块的格式：DATES: ...\n...详细信息...
     blocks = re.split(r'(?=^DATES:)', doubao_ipo_text, flags=re.MULTILINE)
 
-    first_day_blocks = []
-    ongoing_lines = []
-    seen_codes: set[str] = set()   # 去重：同一只 IPO 只输出一次
+    detail_blocks = []
+    seen_codes: set[str] = set()
 
     for block in blocks:
         block = block.strip()
         if not block:
             continue
 
-        # 提取 DATES 行（兼容全角竖线｜和半角|）
+        # 提取 DATES 行用于去重（兼容全角竖线）
         dates_match = re.match(r'^DATES:\s*(.+)$', block, re.MULTILINE)
-        if not dates_match:
-            # 没有 DATES 行（豆包未遵守格式），按首日处理保留完整
-            first_day_blocks.append(block)
-            continue
+        if dates_match:
+            dates_line = dates_match.group(1).replace('｜', '|')
+            parts = [p.strip() for p in dates_line.split("|")]
+            code = parts[0].zfill(5) if parts else ""
+            name = parts[1] if len(parts) > 1 else ""
 
-        dates_line = dates_match.group(1).strip()
-        # 统一全角竖线为半角
-        dates_line = dates_line.replace('｜', '|')
-        parts = [p.strip() for p in dates_line.split("|")]
+            # 跳过占位符条目
+            if "[" in code or "[" in name:
+                logger.debug(f"[IPO-fmt] 跳过占位符条目: {code!r} {name!r}")
+                continue
 
-        # 解析 code, name, sub_start, sub_end
-        code = parts[0].zfill(5) if len(parts) > 0 else ""
-        name = parts[1] if len(parts) > 1 else ""
-        sub_start_str = parts[2] if len(parts) > 2 else ""
-        sub_end_str = parts[3] if len(parts) > 3 else ""
+            # 按代码去重（无代码时按名称）
+            dedup_key = code if code and "[" not in code else name
+            if dedup_key in seen_codes:
+                logger.debug(f"[IPO-fmt] 跳过重复条目: {dedup_key}")
+                continue
+            if dedup_key:
+                seen_codes.add(dedup_key)
 
-        # 去掉 DATES 行，保留后面的详细文本
-        detail_text = re.sub(r'^DATES:.*\n?', '', block, count=1, flags=re.MULTILINE).strip()
-
-        # 容错日期解析
-        sub_start = _parse_date(sub_start_str)
-        sub_end = _parse_date(sub_end_str)
-
-        # 去重：同一只 IPO（按代码去重；无代码时按名称）
-        dedup_key = code if code and "[" not in code else name.strip()
-        if dedup_key in seen_codes:
-            logger.debug(f"[IPO-fmt] 跳过重复条目: {dedup_key}")
-            continue
-        if dedup_key:
-            seen_codes.add(dedup_key)
-
-        is_first_day = (sub_start is not None and sub_start == today_date)
-
-        if is_first_day:
-            first_day_blocks.append(detail_text)
+            # 去掉 DATES 行，保留详细信息
+            detail_text = re.sub(r'^DATES:.*\n?', '', block, count=1, flags=re.MULTILINE).strip()
+            if detail_text:
+                detail_blocks.append(detail_text)
         else:
-            # 续期：构造简短提醒
-            # 防御：跳过豆包用占位符填充的无效条目
-            if "[" in code or "[" in name or not name.strip():
-                logger.debug(f"[IPO-fmt] 跳过占位符条目: code={code!r} name={name!r}")
-                continue
-            if sub_start and sub_end:
-                date_range = (f"{sub_start.month}月{sub_start.day}日"
-                              f"—{sub_end.month}月{sub_end.day}日")
-            elif "[" not in sub_start_str and "[" not in sub_end_str and (sub_start_str or sub_end_str):
-                date_range = f"{sub_start_str}—{sub_end_str}"
-            else:
-                logger.debug(f"[IPO-fmt] 跳过日期缺失条目: {name} start={sub_start_str!r} end={sub_end_str!r}")
-                continue
-            display_code = code if code else ""
-            ongoing_lines.append(
-                f"{name}（{display_code}.HK）：{date_range}"
-            )
+            # 无 DATES 行，直接保留
+            detail_blocks.append(block)
 
-    # 拼装最终输出
-    parts_out = ["▶️五、*今日招股（新股認購）*"]
-    if first_day_blocks:
-        parts_out.append("\n\n".join(first_day_blocks))
-    if ongoing_lines:
-        parts_out.append("正在招股：\n" + "\n".join(ongoing_lines))
-    if not first_day_blocks and not ongoing_lines:
-        parts_out.append("• 今日暫無新股認購")
+    if not detail_blocks:
+        return "▶️五、*今日招股（新股認購）*\n• 今日暫無新股認購"
 
-    return "\n\n".join(parts_out)
+    return "▶️五、*今日招股（新股認購）*\n\n" + "\n\n".join(detail_blocks)
 
 
 # ─────────────────────────────────────────────
