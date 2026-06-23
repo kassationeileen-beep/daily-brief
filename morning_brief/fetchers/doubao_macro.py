@@ -355,7 +355,7 @@ def fetch_doubao_ipo(
     date_str = date_hkt.strftime("%Y年%m月%d日")
 
     if ipo_list:
-        # ── 丰富模式：DATES 行由爬虫提供，代码和日期不依赖豆包 ──
+        # ── 丰富模式：DATES 行由系统提供，豆包只补搜索内容 ──
         dates_lines = []
         for s in ipo_list:
             code  = s.get("code", "").zfill(5)
@@ -481,11 +481,16 @@ def parse_market_summary(raw_text: str) -> dict:
 # IPO 格式化
 # ─────────────────────────────────────────────
 
-def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
+def fmt_doubao_ipo_section_smart(
+    doubao_ipo_text: str,
+    today_date=None,
+    futu_lookup: dict = None,
+) -> str:
     """
     将豆包 IPO 原始输出格式化为第五部分。
     所有在认购期内的新股统一输出完整详情块，去除重复条目。
     豆包每只 IPO 以 DATES 行开头，后接详细信息。
+    futu_lookup: {zfill(5)代码 -> ipo_fetcher dict}，用于后处理 N/A 字段。
     """
     import re
 
@@ -493,6 +498,8 @@ def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
         return "▶️五、*今日招股（新股認購）*\n• 今日暫無新股認購"
     if doubao_ipo_text.strip() in ("今日無港股新股認購", "今日无港股新股认购"):
         return "▶️五、*今日招股（新股認購）*\n• 今日暫無新股認購"
+
+    futu_lookup = futu_lookup or {}
 
     # 按 DATES: 行分割各 IPO 块
     blocks = re.split(r'(?=^DATES:)', doubao_ipo_text, flags=re.MULTILINE)
@@ -528,6 +535,24 @@ def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
 
             # 去掉 DATES 行，保留详细信息
             detail_text = re.sub(r'^DATES:.*\n?', '', block, count=1, flags=re.MULTILINE).strip()
+
+            # 后处理：用 Futu 已知字段覆盖 Doubao 输出的 N/A
+            futu = futu_lookup.get(code) or futu_lookup.get(code.lstrip("0"))
+            if futu:
+                price = (futu.get("price_hkd") or "").strip()
+                lot   = (futu.get("lot_size") or "").strip()
+                if price and price != "N/A":
+                    # 替换"發行價：N/A，每手N/A股" 或 "發行價：N/A"
+                    lot_str = f"每手{lot}股" if lot and lot != "N/A" else "每手N/A股"
+                    detail_text = re.sub(
+                        r'發行價：N/A[^；\n]*',
+                        f'發行價：{price} 港元，{lot_str}',
+                        detail_text,
+                    )
+                if lot and lot != "N/A":
+                    # 兜底：万一上面的替换没命中，单独替换"每手N/A股"
+                    detail_text = re.sub(r'每手N/A股', f'每手{lot}股', detail_text)
+
             if detail_text:
                 detail_blocks.append(detail_text)
         else:
