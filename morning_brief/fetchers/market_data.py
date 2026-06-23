@@ -51,23 +51,45 @@ def fetch_hsi() -> dict:
         import akshare as ak
         df = _timed(lambda: ak.stock_hk_index_daily_em(symbol="恒生指数"), "HSI-akshare")
         if df is not None and not df.empty:
-            row = df.iloc[-1]
             logger.debug(f"[HSI-akshare] 列名: {list(df.columns)}")
-            for cname in ["收盘", "close", "Close"]:
-                if cname in df.columns:
-                    close = float(row[cname])
-                    prev = float(df.iloc[-2][cname]) if len(df) > 1 else close
+            # 找收盘列名
+            close_col = next((c for c in ["收盘", "close", "Close"] if c in df.columns), None)
+            if close_col:
+                # 跳过收盘价为 0 或 NaN 的行（早盘前 API 可能插入空行）
+                def _is_positive(v):
+                    try:
+                        return float(v) > 0
+                    except (TypeError, ValueError):
+                        return False
+                valid_rows = df[df[close_col].apply(_is_positive)]
+                if not valid_rows.empty:
+                    row = valid_rows.iloc[-1]
+                    close = float(row[close_col])
                     result["close"] = round(close, 2)
-                    result["pct"] = round((close - prev) / prev * 100, 2)
+                    # 优先用 涨跌幅 列（避免行间比较出错）
+                    pct_col = next((c for c in ["涨跌幅", "pct_chg", "pct", "change_pct"] if c in df.columns), None)
+                    if pct_col:
+                        pct_raw = float(row[pct_col])
+                        result["pct"] = round(pct_raw, 2)
+                    else:
+                        # 退后：用前一有效行计算
+                        if len(valid_rows) > 1:
+                            prev = float(valid_rows.iloc[-2][close_col])
+                            result["pct"] = round((close - prev) / prev * 100, 2)
                     logger.info(f"[HSI-akshare] 收盘: {close:.2f} ({result['pct']:+.2f}%)")
-                    break
+                else:
+                    logger.warning("[HSI-akshare] 所有行收盘价均为 0 或 NaN，放弃")
             for cname in ["成交额", "amount", "Amount", "turnover", "Turnover"]:
                 if cname in df.columns:
-                    raw = float(row[cname])
-                    # akshare 恒生指数 成交额单位通常为亿港元（raw ≈ 1000-2000）
-                    # 若取到原始元值（raw > 1e10），则除以1e8换算
-                    result["turnover_hkd_100m"] = round(raw / 1e8 if raw > 1e10 else raw, 2)
-                    logger.debug(f"[HSI-akshare] 成交额 raw={raw} → {result['turnover_hkd_100m']} 亿港元")
+                    try:
+                        raw = float(df.iloc[-1][cname])
+                    except (TypeError, ValueError):
+                        raw = 0.0
+                    if raw > 0:
+                        # akshare 恒生指数 成交额单位通常为亿港元（raw ≈ 1000-2000）
+                        # 若取到原始元值（raw > 1e10），则除以1e8换算
+                        result["turnover_hkd_100m"] = round(raw / 1e8 if raw > 1e10 else raw, 2)
+                        logger.debug(f"[HSI-akshare] 成交额 raw={raw} → {result['turnover_hkd_100m']} 亿港元")
                     break
     except Exception as e:
         logger.warning(f"[HSI-akshare] 失败: {e}")

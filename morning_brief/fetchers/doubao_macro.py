@@ -157,23 +157,37 @@ _SYSTEM_IPO_SEARCH = f"""你是服务香港证券从业者的专业金融早报�
 
 任务：搜索今日（认购期包含今日）的港股新股认购（IPO申购）信息。
 
-【搜索步骤】
-1. 先搜索今日港股认购新股名单（包含首日及续期认购）
-2. 对每只找到的新股，进一步搜索其招股书摘要、HKEX公告、港交所披露易及财经媒体（信报、经济日报、阿思达克），获取公司介绍、财务数据、发行价、每手股数、保荐人等详细信息
+【必须严格按两步执行，不得合并或跳步】
 
-【每只股票输出格式（每块之间空行分隔，DATES 行必须在每块最前面）】
+第一步：建立今日 IPO 完整名单
+- 搜索「港股今日认购新股」「港股 IPO 新股申购」「HKEX IPO listing」等关键词
+- 同时搜索续期认购（認購期已开始但尚未截止的新股）
+- 汇总所有来源，去除重复，确认今日认购名单完整后，在内部记录每只股票的代码和认购期
+- 若今日確實無新股認購，直接輸出「今日無港股新股認購」後停止
+
+第二步：逐只搜索详细信息并输出
+- 对第一步名单中的每只股票，分别搜索招股书摘要、HKEX公告、港交所披露易及财经媒体（信报、经济日报、阿思达克），补充完整资料
+- 按以下格式输出，每只股票之间空行分隔，DATES 行必须在每块最前面
+
+【每只股票输出格式】
 DATES: 股票代碼（5位含前導零）|公司名稱|認購起始日（YYYY-MM-DD）|認購截止日（YYYY-MM-DD）
 {_DETAIL_BLOCK_FORMAT}
 
 【約束】
 - 每只股票必須以 DATES: 行開頭，格式嚴格為「DATES: 代碼|名稱|起始日|截止日」，日期格式 YYYY-MM-DD
+- 禁止遺漏第一步找到的任何股票；禁止同一股票出現兩次
 - 必須搜尋每只股票的招股說明書或HKEX公告以填寫詳細字段，禁止不搜尋就填 N/A
 - 若搜尋後確實找不到某字段，才填 N/A；嚴禁使用 [待查]、[TBD] 等占位符
-- 若今日確實無新股認購，輸出：今日無港股新股認購
 - 使用繁體中文；數字保留具體值
 - 不輸出解釋性前言後語"""
 
-_USER_IPO_SEARCH = "今天是{date}（北京時間07:30），請搜索今日（{month}月{day}日）仍在認購期的港股新股，按格式輸出（每只股票必須以 DATES: 行開頭）。包括首日招股和續期招股，請搜索全面，並對每只股票查詢招股書及HKEX公告以獲取完整資料。"
+_USER_IPO_SEARCH = (
+    "今天是{date}（北京時間07:30）。\n\n"
+    "請按系統指示的兩步驟執行：\n"
+    "第一步：先搜索今日（{month}月{day}日）所有仍在認購期的港股新股完整名單（首日+續期），"
+    "確認沒有遺漏後記錄名單。\n"
+    "第二步：對名單中每只股票逐一搜索招股書及HKEX公告，按 DATES: 格式逐一輸出，不得遺漏任何一只。"
+)
 
 # ── 资金动态 ──────────────────────────────────
 # cron 在 07:30 运行，港股/A股尚未开市，需查询最近一个交易日数据
@@ -512,6 +526,7 @@ def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
 
     first_day_blocks = []
     ongoing_lines = []
+    seen_codes: set[str] = set()   # 去重：同一只 IPO 只输出一次
 
     for block in blocks:
         block = block.strip()
@@ -543,7 +558,16 @@ def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
         sub_start = _parse_date(sub_start_str)
         sub_end = _parse_date(sub_end_str)
 
-        is_first_day = (sub_start is not None and sub_start == today_date)
+        # 去重：同一只 IPO（按代码去重；无代码时按名称）
+        dedup_key = code if code and "[" not in code else name.strip()
+        if dedup_key in seen_codes:
+            logger.debug(f"[IPO-fmt] 跳过重复条目: {dedup_key}")
+            continue
+        if dedup_key:
+            seen_codes.add(dedup_key)
+
+        # sub_start 为 None（来源未提供，如 Futu）→ 视为首日显示完整详情
+        is_first_day = (sub_start is None or sub_start == today_date)
 
         if is_first_day:
             first_day_blocks.append(detail_text)

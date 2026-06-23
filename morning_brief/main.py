@@ -312,23 +312,21 @@ def _extract_earnings_requests(manual_stock_items: dict) -> tuple[dict, list[dic
 
 
 def _merge_manual_ipo_section(ipo_section: str, manual_items: list[str]) -> str:
-    """把 Telegram 人工 IPO 输入强制合并进第五部分，避免读入后被主流程忽略。"""
+    """
+    把 Telegram 人工 IPO 输入合并进第五部分。
+
+    手动输入视为权威来源：完全替换自动抓取内容，避免重复叠加。
+    若手动输入为空，保留自动抓取结果。
+    """
     manual_items = [item.strip() for item in (manual_items or []) if item and item.strip()]
     if not manual_items:
         return ipo_section
 
-    manual_block = "人工補充（Telegram）：\n" + "\n".join(
-        f"• {item}" for item in manual_items
-    )
-
-    empty_markers = ("• 今日暫無新股認購", "• 今日暂无新股认购")
-    if ipo_section and any(marker in ipo_section for marker in empty_markers):
-        header = ipo_section.splitlines()[0]
-        return f"{header}\n{manual_block}"
-
-    if ipo_section:
-        return f"{ipo_section.rstrip()}\n\n{manual_block}"
-    return f"▶️五、*今日招股（新股認購）*\n{manual_block}"
+    # 手动输入直接成为第五部分正文，不再追加"人工補充"标签
+    lines = ["▶️五、*今日招股（新股認購）*"]
+    for item in manual_items:
+        lines.append(item)
+    return "\n".join(lines)
 
 # ─────────────────────────────────────────────
 # 主流程
