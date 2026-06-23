@@ -535,7 +535,17 @@ def main():
                 date_hkt=now_hkt,
             )
             if doubao_ipo_text:
-                ipo_section = fmt_doubao_ipo_section_smart(doubao_ipo_text, today_date=now_hkt.date())
+                # 构建 Futu 已知字段查找表（按 zfill(5) 代码索引）
+                futu_lookup = {
+                    s.get("code", "").zfill(5): s
+                    for s in (ipo_list_scraped or [])
+                    if s.get("source") == "futu"
+                }
+                ipo_section = fmt_doubao_ipo_section_smart(
+                    doubao_ipo_text,
+                    today_date=now_hkt.date(),
+                    futu_lookup=futu_lookup,
+                )
                 logger.info("[DoubaoIPO] 招股信息生成成功")
             else:
                 logger.warning("[DoubaoIPO] 豆包返回空，降级")
