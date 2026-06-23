@@ -132,23 +132,24 @@ _DETAIL_BLOCK_FORMAT = """\
 _SYSTEM_IPO = f"""你是服务香港证券从业者的专业金融早报编辑。
 每日早报发布时间：北京时间 07:30。
 
-任务：以下港股新股的代号和招股日期已由系统确认（DATES 行已提供），
-请在每个 DATES 行后面补充详细信息。
+任务：以下港股新股的代号和认购截止日已由系统确认，请为每只股票补充详细信息，并搜索填入认购起始日。
 
-【每只股票输出格式（DATES 行原样保留，不得修改）】
-DATES: 02729|凱樂士科技|2026-03-16|2026-03-20
+【每只股票输出格式】
+DATES: 代碼（5位含前導零）|公司名稱（繁體中文）|認購起始日（YYYY-MM-DD）|認購截止日（YYYY-MM-DD）
 {_DETAIL_BLOCK_FORMAT}
 
 【約束】
-- DATES 行必須保持原樣，不得修改代碼或日期
+- 代碼和認購截止日（第一、四字段）不得修改
+- 公司名稱（第二字段）：若輸入為英文，必須搜索 HKEX 公告找出官方中文名稱并替換
+- 認購起始日（第三字段）：若為空，必須搜索 HKEX 披露易或招股說明書找出起始日期并填入，格式 YYYY-MM-DD
 - 找不到的字段填 N/A，嚴禁使用任何中括號占位符
 - 使用繁體中文；數字保留具體值
 - 不輸出解釋性前言後語"""
 
 _USER_IPO = (
-    "今天是{date}（北京時間07:30）。以下港股今日在認購期內（代號和日期已由系統確認）：\n\n"
+    "今天是{date}（北京時間07:30）。以下港股今日在認購期內（代號和截止日由系統確認）：\n\n"
     "{dates_block}\n\n"
-    "請在每個 DATES 行後補充詳細信息，DATES 行保持原樣不修改。"
+    "請為每只股票：①搜索 HKEX 找出認購起始日及官方中文名稱并填入 DATES 行；②在 DATES 行後補充詳細信息。"
 )
 
 # 獨立搜索模式：爬蟲無數據時，豆包自行搜索（必須輸出 DATES 行以支持首日/續期判斷）
@@ -566,8 +567,7 @@ def fmt_doubao_ipo_section_smart(doubao_ipo_text: str, today_date=None) -> str:
         if dedup_key:
             seen_codes.add(dedup_key)
 
-        # sub_start 为 None（来源未提供，如 Futu）→ 视为首日显示完整详情
-        is_first_day = (sub_start is None or sub_start == today_date)
+        is_first_day = (sub_start is not None and sub_start == today_date)
 
         if is_first_day:
             first_day_blocks.append(detail_text)
