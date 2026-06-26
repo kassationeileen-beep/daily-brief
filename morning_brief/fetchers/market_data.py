@@ -40,59 +40,77 @@ def _safe(fn, label: str):
 
 def fetch_hsi() -> dict:
     """恒生指数：收盘价、涨跌幅、成交额（亿港元）
-    收盘价主：akshare stock_hk_index_daily_em（东方财富港股指数）
+    收盘价主：akshare index_global_spot_em（东财全球指数实时快照，与日经同源）
     收盘价备：yfinance ^HSI
+    成交额主：akshare stock_hk_index_daily_em 有效行成交额
     成交额备：yfinance 成交量 × 均价（粗估）、HKEX 官方页面
     """
     result = {"close": None, "pct": None, "turnover_hkd_100m": None, "error": None}
 
-    # ── 收盘价主：akshare stock_hk_index_daily_em ─────────────────────────────
+    # ── 收盘价主：akshare index_global_spot_em（实时快照，无日期选行问题）──────
+    # 日线历史接口（stock_hk_index_daily_em）按日期索引，7:30 触发受时区/夏令时影响
+    # 易选错行，且早盘前会插入今日占位行；spot 快照返回单一最新值，收盘后到次日开盘前
+    # 始终显示上一交易日收盘，从根本上规避「次日早上数据错」问题。
     try:
         import akshare as ak
-        df = _timed(lambda: ak.stock_hk_index_daily_em(symbol="恒生指数"), "HSI-akshare")
+        df = _timed(lambda: ak.index_global_spot_em(), "HSI-spot")
         if df is not None and not df.empty:
-            logger.debug(f"[HSI-akshare] 列名: {list(df.columns)}")
-            # 找收盘列名
-            close_col = next((c for c in ["收盘", "close", "Close"] if c in df.columns), None)
-            if close_col:
-                # 跳过收盘价为 0 或 NaN 的行（早盘前 API 可能插入空行）
+            row = df[df["代码"] == "HSI"]
+            if not row.empty:
+                r = row.iloc[0]
+                close = float(r["最新价"])
+                pct   = float(r["涨跌幅"])
+                if close > 0:
+                    result["close"] = round(close, 2)
+                    result["pct"] = round(pct, 2)
+                    logger.info(
+                        f"[HSI-spot] 收盘: {close:.2f} ({pct:+.2f}%) "
+                        f"更新: {r.get('最新行情时间','')}"
+                    )
+            if result["close"] is None:
+                logger.warning("[HSI-spot] 未取到有效 HSI 行")
+    except Exception as e:
+        logger.warning(f"[HSI-spot] 失败: {e}")
+
+    # ── 成交额主：日线接口取最后一个收盘价>0 的有效行（与占位行隔离）──────────
+    try:
+        import akshare as ak
+        dfd = _timed(lambda: ak.stock_hk_index_daily_em(symbol="恒生指数"), "HSI-turnover")
+        if dfd is not None and not dfd.empty:
+            close_col = next((c for c in ["收盘", "close", "Close"] if c in dfd.columns), None)
+            amt_col   = next((c for c in ["成交额", "amount", "Amount", "turnover", "Turnover"]
+                              if c in dfd.columns), None)
+            if amt_col:
                 def _is_positive(v):
                     try:
                         return float(v) > 0
                     except (TypeError, ValueError):
                         return False
-                valid_rows = df[df[close_col].apply(_is_positive)]
-                if not valid_rows.empty:
-                    row = valid_rows.iloc[-1]
-                    close = float(row[close_col])
-                    result["close"] = round(close, 2)
-                    # 优先用 涨跌幅 列（避免行间比较出错）
-                    pct_col = next((c for c in ["涨跌幅", "pct_chg", "pct", "change_pct"] if c in df.columns), None)
-                    if pct_col:
-                        pct_raw = float(row[pct_col])
-                        result["pct"] = round(pct_raw, 2)
-                    else:
-                        # 退后：用前一有效行计算
-                        if len(valid_rows) > 1:
-                            prev = float(valid_rows.iloc[-2][close_col])
-                            result["pct"] = round((close - prev) / prev * 100, 2)
-                    logger.info(f"[HSI-akshare] 收盘: {close:.2f} ({result['pct']:+.2f}%)")
-                else:
-                    logger.warning("[HSI-akshare] 所有行收盘价均为 0 或 NaN，放弃")
-            for cname in ["成交额", "amount", "Amount", "turnover", "Turnover"]:
-                if cname in df.columns:
+                # 与收盘价同源的有效行：剔除占位/未收盘行
+                valid = dfd[dfd[close_col].apply(_is_positive)] if close_col else dfd
+                if not valid.empty:
                     try:
-                        raw = float(df.iloc[-1][cname])
+                        raw = float(valid.iloc[-1][amt_col])
                     except (TypeError, ValueError):
                         raw = 0.0
                     if raw > 0:
-                        # akshare 恒生指数 成交额单位通常为亿港元（raw ≈ 1000-2000）
-                        # 若取到原始元值（raw > 1e10），则除以1e8换算
+                        # 恒生指数成交额单位通常为亿港元（raw ≈ 1000-2000）
+                        # 若取到原始元值（raw > 1e10），除以 1e8 换算
                         result["turnover_hkd_100m"] = round(raw / 1e8 if raw > 1e10 else raw, 2)
-                        logger.debug(f"[HSI-akshare] 成交额 raw={raw} → {result['turnover_hkd_100m']} 亿港元")
-                    break
+                        logger.info(f"[HSI-turnover] 成交额: {result['turnover_hkd_100m']} 亿港元")
+                # 日线接口顺带兜底收盘价（spot 失败时）
+                if result["close"] is None and close_col and not valid.empty:
+                    close = float(valid.iloc[-1][close_col])
+                    result["close"] = round(close, 2)
+                    pct_col = next((c for c in ["涨跌幅", "pct_chg", "pct"] if c in dfd.columns), None)
+                    if pct_col:
+                        result["pct"] = round(float(valid.iloc[-1][pct_col]), 2)
+                    elif len(valid) > 1:
+                        prev = float(valid.iloc[-2][close_col])
+                        result["pct"] = round((close - prev) / prev * 100, 2)
+                    logger.info(f"[HSI-daily] 收盘兜底: {close:.2f}")
     except Exception as e:
-        logger.warning(f"[HSI-akshare] 失败: {e}")
+        logger.warning(f"[HSI-turnover] 失败: {e}")
 
     # ── 收盘价备：yfinance ^HSI ───────────────────────────────────────────────
     yf_avg_price = None
