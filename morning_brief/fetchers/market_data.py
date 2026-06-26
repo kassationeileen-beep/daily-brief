@@ -358,13 +358,45 @@ def fetch_a_share_indices() -> dict:
 
 def fetch_nikkei225() -> dict:
     """日经225：收盘价、涨跌幅。
-    主：akshare index_global_spot_em（东财全球指数，稳定）
-    备：yfinance ^N225（Volume 固定为0，Futu 亦不支持 JP 指数）
-    成交量不可得，volume_100m 固定为 None。
+    主：日本经济新闻社（Nikkei Inc.）官方指数日线 CSV（指数编制方，最权威）
+    备1：akshare index_global_spot_em（东财全球指数实时快照）
+    备2：yfinance ^N225（Volume 固定为0，Futu 亦不支持 JP 指数）
+    成交量无权威免费源，volume_100m 固定为 None。
     """
     result = {"close": None, "pct": None, "volume_100m": None, "error": None}
 
-    # 主：akshare 东财全球指数实时行情
+    # ── 主：Nikkei Inc. 官方指数日线 CSV ──────────────────────────────────────
+    # 日经225 由日本经济新闻社编制并发布，此 CSV 是权威原始来源。
+    # 列序：日期, 終値(收盘), 始値, 高値, 安値。文件为 Shift-JIS，数据行均 ASCII。
+    # 取最后一行即最近交易日官方收盘：收盘后到次日东京开盘(9:00 JST=8:00 HKT)前，
+    # 始终是上一交易日收盘，避免实时快照接口在东京已开盘后取到当日盘中价的风险。
+    try:
+        import requests, re
+        url = "https://indexes.nikkei.co.jp/nkave/historical/nikkei_stock_average_daily_jp.csv"
+        resp = _timed(
+            lambda: requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"}),
+            "N225-official",
+        )
+        resp.raise_for_status()
+        text = resp.content.decode("shift_jis", errors="ignore")
+        rows = []
+        for line in text.splitlines():
+            m = re.match(r'^"(\d{4}/\d{2}/\d{2})","([\d.]+)"', line)
+            if m:
+                rows.append((m.group(1), float(m.group(2))))
+        if len(rows) >= 2:
+            date_str, close = rows[-1]
+            prev = rows[-2][1]
+            if close > 0 and prev > 0:
+                pct = (close - prev) / prev * 100
+                result.update({"close": round(close, 2), "pct": round(pct, 2)})
+                logger.info(f"[N225-official] 收盘: {close:.2f} ({pct:+.2f}%) 日期: {date_str}")
+                return result
+        logger.warning("[N225-official] CSV 行数不足或解析失败")
+    except Exception as e:
+        logger.warning(f"[N225-official] {e}")
+
+    # ── 备1：akshare 东财全球指数实时快照 ─────────────────────────────────────
     try:
         import akshare as ak
         df = ak.index_global_spot_em()
