@@ -308,7 +308,8 @@ def fetch_a_share_indices() -> dict:
     }
     errors = []
 
-    # 上证综指
+    # 上证综指（顺带捕获最近交易日，供成交额按同日查询）
+    ref_date = None  # 形如 '20260716'
     try:
         df = _timed(lambda: ak.stock_zh_index_daily(symbol="sh000001"), "SH")
         if df is not None and not df.empty:
@@ -317,6 +318,10 @@ def fetch_a_share_indices() -> dict:
             prev = float(df.iloc[-2]["close"]) if len(df) > 1 else close
             result["sh_close"] = round(close, 2)
             result["sh_pct"] = round((close - prev) / prev * 100, 2)
+            try:
+                ref_date = str(row["date"]).replace("-", "")[:8]
+            except Exception:
+                ref_date = None
     except Exception as e:
         errors.append(f"上证: {e}")
         logger.warning(f"[SH] {e}")
@@ -356,50 +361,55 @@ def fetch_a_share_indices() -> dict:
         except (ValueError, TypeError):
             return None
 
+    # 主：沪深交易所官方每日概况相加（stock_sse_deal_daily + stock_szse_summary）
+    # 用 ref_date（上证 daily 最近交易日）查询，保证成交额与收盘价同一交易日。
+    # 注：legu 接口 2026 年起已移除成交额字段，仅剩涨跌家数，故弃用。
     try:
-        df2 = _timed(lambda: ak.stock_market_activity_legu(), "A-turnover-legu")
-        if df2 is not None and not df2.empty:
-            logger.debug(f"[A-turnover-legu] 列名: {list(df2.columns)}, 数据:\n{df2.to_string()}")
-            # 遍历所有列和行，寻找包含"成交"+"额"的字段
-            found = False
-            for col in df2.columns:
-                if "成交" in str(col) and "额" in str(col):
-                    val = _parse_turnover_str(df2[col].iloc[0])
-                    if val is not None:
-                        result["total_turnover_trillion"] = val
-                        found = True
-                        break
-            # 若列名中没有，尝试从值列中匹配（宽表转长表格式）
-            if not found:
-                for _, row2 in df2.iterrows():
-                    for col in df2.columns:
-                        cell = str(row2.get(col, ""))
-                        if "成交额" in cell or "沪深成交" in cell:
-                            # 找同行或下一列的数值
-                            cols_list = list(df2.columns)
-                            idx = cols_list.index(col)
-                            if idx + 1 < len(cols_list):
-                                val = _parse_turnover_str(row2[cols_list[idx + 1]])
-                                if val is not None:
-                                    result["total_turnover_trillion"] = val
-                                    found = True
-                                    break
-                    if found:
-                        break
+        sh_amt = None  # 万亿元
+        sz_amt = None
+        if ref_date:
+            # 上交所：股票 成交金额，单位亿元
+            try:
+                dfs = _timed(lambda: ak.stock_sse_deal_daily(date=ref_date), "A-turnover-SSE")
+                if dfs is not None and not dfs.empty and "股票" in dfs.columns:
+                    hit = dfs[dfs["单日情况"] == "成交金额"]
+                    if not hit.empty:
+                        sh_amt = float(hit["股票"].iloc[0]) / 1e4  # 亿元 → 万亿
+            except Exception as e:
+                logger.warning(f"[A-turnover-SSE] {e}")
+            # 深交所：证券类别==股票 成交金额，单位元
+            try:
+                dfz = _timed(lambda: ak.stock_szse_summary(date=ref_date), "A-turnover-SZSE")
+                if dfz is not None and not dfz.empty:
+                    hit = dfz[dfz["证券类别"] == "股票"]
+                    if not hit.empty:
+                        sz_amt = float(hit["成交金额"].iloc[0]) / 1e12  # 元 → 万亿
+            except Exception as e:
+                logger.warning(f"[A-turnover-SZSE] {e}")
+        if sh_amt is not None and sz_amt is not None:
+            result["total_turnover_trillion"] = round(sh_amt + sz_amt, 4)
+            logger.info(
+                f"[A-turnover] 沪 {sh_amt:.4f} + 深 {sz_amt:.4f} "
+                f"= {result['total_turnover_trillion']} 万亿 ({ref_date})"
+            )
     except Exception as e:
-        logger.warning(f"[A-turnover-legu] {e}，尝试备用接口")
+        logger.warning(f"[A-turnover] 官方接口失败: {e}")
+
+    # 备：全量 spot 成交额求和（慢但兜底）
+    if result["total_turnover_trillion"] is None:
         try:
             df = _timed(lambda: ak.stock_zh_a_spot_em(), "A-turnover-spot")
             if df is not None and not df.empty:
-                logger.debug(f"[A-turnover-spot] 列名: {list(df.columns)}")
                 for col in ["成交额", "amount", "总成交额"]:
                     if col in df.columns:
                         total = df[col].sum()
-                        result["total_turnover_trillion"] = round(total / 1e12, 4)
+                        if total > 0:
+                            result["total_turnover_trillion"] = round(total / 1e12, 4)
+                            logger.info(f"[A-turnover-spot] {result['total_turnover_trillion']} 万亿")
                         break
         except Exception as e2:
             errors.append(f"A股成交额: {e2}")
-            logger.warning(f"[A-turnover] 两种方式均失败: {e2}")
+            logger.warning(f"[A-turnover] 官方+spot 均失败: {e2}")
 
     if errors:
         result["error"] = "; ".join(errors)
