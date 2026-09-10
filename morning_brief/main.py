@@ -94,13 +94,11 @@ def build_brief(
     hsi_turnover = fmt_num(hsi.get("turnover_hkd_100m")) if hsi.get("turnover_hkd_100m") else "N/A"
     hsi_block = (
         f"1. 恒生指數（港股）\n"
-        f"- 交易日期：{hsi.get('trade_date') or '待核實'}\n"
         f"- 收盤價：{hsi_close} 點（{hsi_pct}）\n"
-        f"- 港股成交額（主板＋GEM）：{hsi_turnover} 億港元\n"
-        f"- 來源：港交所每日行情\n"
+        f"- 成交額：{hsi_turnover} 億港元\n"
     )
     if hsi.get("error") and not hsi.get("close"):
-        hsi_block += "⚠️ 當日官方收盤數據未取得，請手動核實\n"
+        hsi_block = warn("恒生指數") + "\n"
 
     # 南向资金
     if sb.get("net_flow_hkd_100m") is not None:
@@ -402,7 +400,7 @@ def main():
         market_data = {}
 
     # ── Step 1b: 豆包补充资金动态（填补 scraper 缺失字段）─────────────────────
-    # 补充字段：北水净流向、A股总成交额（恒指及港股成交额仅用官方日报）
+    # 补充字段：HSI 成交额、北水净流向、A股总成交额
     # 只在对应字段为空时补充，不覆盖 scraper 已获取的数据
     doubao_market_available = bool(os.environ.get("ARK_API_KEY") and (
         os.environ.get("DOUBAO_BOT_MARKET") or os.environ.get("DOUBAO_BOT_MACRO")
@@ -417,7 +415,17 @@ def main():
                 # 逐字段补充：只填 scraper 未获取到的
                 # 注意：_safe 失败时返回 None，setdefault 对已存在的 None 值无效，
                 # 须用 "or {}" 确保始终有可操作的 dict
-                # HSI close/turnover require dated official reports; never fill from LLM text.
+                hsi = market_data.get("hsi") or {}
+                market_data["hsi"] = hsi
+                if hsi.get("close") is None and db_market["hsi"].get("close") is not None:
+                    hsi["close"] = db_market["hsi"]["close"]
+                    logger.info(f"  [DoubaoMarket] 补充 HSI close: {hsi['close']}")
+                if hsi.get("pct") is None and db_market["hsi"].get("pct") is not None:
+                    hsi["pct"] = db_market["hsi"]["pct"]
+                if hsi.get("turnover_hkd_100m") is None and db_market["hsi"].get("turnover_hkd_100m") is not None:
+                    hsi["turnover_hkd_100m"] = db_market["hsi"]["turnover_hkd_100m"]
+                    logger.info(f"  [DoubaoMarket] 补充 HSI 成交额: {hsi['turnover_hkd_100m']} 亿")
+
                 sb = market_data.get("southbound") or {}
                 market_data["southbound"] = sb
                 if sb.get("net_flow_hkd_100m") is None and db_market["southbound"].get("net_flow_hkd_100m") is not None:

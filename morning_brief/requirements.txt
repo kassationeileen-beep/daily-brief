@@ -16,6 +16,3 @@ httpx>=0.27.0
 # 数据处理
 pandas>=2.0.0
 numpy>=1.24.0
-
-# Hong Kong sessions including exchange holidays
-exchange-calendars>=4.11,<5

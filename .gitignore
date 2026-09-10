@@ -33,6 +33,3 @@ morning_brief/seen_events.json
 .idea/
 *.swp
 *.pyc
-
-.test-deps/
-__pycache__/

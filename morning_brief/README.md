@@ -204,16 +204,3 @@ cat output/20260319.md
 ## WhatsApp 兼容说明
 
 早报使用 `*加粗*` 语法（Telegram Markdown V1 格式），在 WhatsApp 中直接粘贴或转发即可正常显示加粗效果。如需通过 WhatsApp Business API 推送，将 `parse_mode` 去掉直接发送纯文本即可，`*号包裹*` 在 WhatsApp 中原生支持。
-
-## 恒指及港股成交额的数据约定
-
-- 按 Asia/Hong_Kong 的早报日期，使用 XHKG 交易日历确定前一个交易日（含香港假期）。即使盘中手动运行，也维持早报前一交易日口径。
-- 恒指收盘取港交所 Main Board Daily Quotations 的 HANG SENG INDEX 下午收盘列；涨跌幅用同一行昨收计算。
-- 港股成交额取同日主板与 GEM 日报的 Today's Turnover (HK$) 之和，除以 1e8 转为亿港元；不使用指数成交量、指数点位或成分股成交额。
-- URL 日期和正文 DATE 必须匹配目标交易日。来源失败、过期、字段缺失时显示 N/A，不自动退到更早日期，也不由 LLM 填充。GEM 缺失时仍可保留已验证的恒指收盘，但不发布主板成交额作为全市场总额。
-- 第一部分独立标注港股交易日期。来源 URL 保留在数据结果中；官方报表格式变更或半日市缺少下午收盘列时会明确缺失，需要核查。
-- 更新部署时重新安装 requirements.txt（新增 exchange-calendars），再运行 `python -m unittest discover -s . -p test_hsi.py -v`。本测试不发送 Telegram。
-
-测试样本来源（2026-09-04，截取报表头和市场摘要）：
-https://www.hkex.com.hk/eng/stat/smstat/dayquot/d260904e.htm
-https://www.hkex.com.hk/eng/stat/smstat/dayquot/GEM/e_G260904.htm

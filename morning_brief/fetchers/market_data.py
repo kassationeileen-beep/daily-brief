@@ -38,82 +38,197 @@ def _safe(fn, label: str):
 # 第一部分：股票指数
 # ─────────────────────────────────────────────
 
-def _hsi_session(now_hkt=None):
-    """Morning brief always reports the last HK session before its local date."""
-    from datetime import timezone
-    import exchange_calendars as xcals
-    hkt = timezone(timedelta(hours=8))
-    now = now_hkt or datetime.now(hkt)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=hkt)
-    day = now.astimezone(hkt).date() - timedelta(days=1)
-    return xcals.get_calendar("XHKG").date_to_session(day, direction="previous").date()
-
-
-def _parse_hkex_daily(html, expected_date, board):
-    """Read only dated market highlights; currency is explicitly HK dollars."""
-    import re
-    from html import unescape
-    text = unescape(re.sub(r"<[^>]+>", "", html))
-    date_match = re.search(r"DATE:\s*(\d{2})\s+([A-Z]{3})\s+(\d{4})", text)
-    if not date_match:
-        raise ValueError("HKEX report date missing")
-    months = "JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC".split()
-    day, month, year = date_match.groups()
-    actual = datetime(int(year), months.index(month) + 1, int(day)).date()
-    if actual != expected_date:
-        raise ValueError(f"HKEX stale/mismatched report: {actual}, expected {expected_date}")
-    marker = "MAIN BOARD AND TRADING ONLY STOCKS" if board == "main" else "GROWTH ENTERPRISE MARKET"
-    if marker not in text:
-        raise ValueError("HKEX wrong board")
-    amount = re.search(r"Today's Turnover:\s*\(HK\$\):\s*([\d,]+)(?=\s)", text)
-    out = {"turnover_hkd": int(amount[1].replace(",", "")) if amount else None}
-    if board == "main":
-        # Columns: morning close, afternoon close, previous close, change, %change.
-        row = re.search(r"HANG SENG INDEX[ \t]+([^\r\n]+)", text)
-        if not row:
-            raise ValueError("HKEX HSI row missing")
-        cols = row[1].split()
-        if len(cols) != 5:
-            raise ValueError("HKEX HSI column layout changed")
-        close, prev = float(cols[1].replace(",", "")), float(cols[2].replace(",", ""))
-        import math
-        if not all(math.isfinite(v) and v > 0 for v in (close, prev)):
-            raise ValueError("HKEX invalid closing price")
-        out.update(close=round(close, 2), pct=round((close / prev - 1) * 100, 2))
+def _fetch_hsi_futu() -> dict:
+    """恒生指数：富途 OpenD HK.800000 快照（收盘价 + 涨跌幅 + 成交额一次原子取得）。
+    update_time 为港股收盘时刻（16:00），收盘后到次日开盘前快照保持上一交易日收盘，
+    无时区选行/盘中歧义。turnover 为恒指成分股口径成交额（港元）。
+    """
+    import os
+    out = {"close": None, "pct": None, "turnover_hkd_100m": None}
+    ctx = None
+    try:
+        from futu import OpenQuoteContext, RET_OK
+        host = os.environ.get("FUTU_OPEND_HOST", "127.0.0.1")
+        port = int(os.environ.get("FUTU_OPEND_PORT", "11111"))
+        ctx = OpenQuoteContext(host=host, port=port)
+        ret, data = ctx.get_market_snapshot(["HK.800000"])
+        if ret != RET_OK or data is None or data.empty:
+            logger.warning(f"[HSI-futu] 快照失败: {data if ret != RET_OK else '空'}")
+            return out
+        r = data.iloc[0]
+        close = float(r["last_price"])
+        prev  = float(r["prev_close_price"])
+        turnover = float(r["turnover"])
+        if close > 0:
+            out["close"] = round(close, 2)
+            if prev > 0:
+                out["pct"] = round((close - prev) / prev * 100, 2)
+        if turnover > 0:
+            out["turnover_hkd_100m"] = round(turnover / 1e8, 2)
+        logger.info(
+            f"[HSI-futu] 收盘: {out['close']} ({out['pct']:+.2f}%) "
+            f"成交额: {out['turnover_hkd_100m']} 亿港元 更新: {r.get('update_time','')}"
+        )
+    except Exception as e:
+        logger.warning(f"[HSI-futu] {e}")
+    finally:
+        if ctx:
+            try:
+                ctx.close()
+            except Exception:
+                pass
     return out
 
 
-def _get_hkex_report(url):
-    import requests
-    response = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-    response.raise_for_status()
-    return response.text
+def fetch_hsi() -> dict:
+    """恒生指数：收盘价、涨跌幅、成交额（亿港元）
+    主：富途 OpenD HK.800000 快照（收盘价+涨跌幅+成交额原子取得，最稳）
+    收盘价备：akshare index_global_spot_em 实时快照 / yfinance ^HSI
+    成交额备：akshare stock_hk_index_daily_em 有效行 / HKEX 官方页面
+    """
+    result = {"close": None, "pct": None, "turnover_hkd_100m": None, "error": None}
 
+    # ── 主：富途 OpenD HK.800000（收盘价+涨跌幅+成交额一次原子取得）────────────
+    futu = _fetch_hsi_futu()
+    if futu["close"] is not None:
+        result["close"] = futu["close"]
+        result["pct"] = futu["pct"]
+    if futu["turnover_hkd_100m"] is not None:
+        result["turnover_hkd_100m"] = futu["turnover_hkd_100m"]
 
-def fetch_hsi(now_hkt=None) -> dict:
-    """Dated HKEX close and Main Board + GEM turnover. Never estimate or backdate."""
-    result = {"close": None, "pct": None, "turnover_hkd_100m": None,
-              "trade_date": None, "source": "HKEX daily quotations", "error": None}
-    try:
-        day = _hsi_session(now_hkt)
-        result["trade_date"] = day.isoformat()
-        base = "https://www.hkex.com.hk/eng/stat/smstat/dayquot/"
-        main_url = base + f"d{day:%y%m%d}e.htm"
-        gem_url = base + f"GEM/e_G{day:%y%m%d}.htm"
-        result.update(close_source=main_url, turnover_sources=[main_url, gem_url])
-        main = _parse_hkex_daily(_get_hkex_report(main_url), day, "main")
-        result.update(close=main["close"], pct=main["pct"])
-        gem = _parse_hkex_daily(_get_hkex_report(gem_url), day, "gem")
-        if main["turnover_hkd"] is None or gem["turnover_hkd"] is None:
-            raise ValueError("HKEX market turnover missing; cannot publish partial total")
-        result["turnover_hkd_100m"] = round(
-            (main["turnover_hkd"] + gem["turnover_hkd"]) / 1e8, 2)
-        logger.info("[HSI-HKEX] %s close=%s turnover=%s 亿港元 (Main Board + GEM)",
-                    day, result["close"], result["turnover_hkd_100m"])
-    except Exception as exc:
-        result["error"] = str(exc)
-        logger.warning("[HSI-HKEX] %s", exc)
+    # ── 收盘价备1：akshare index_global_spot_em（实时快照，无日期选行问题）─────
+    # 日线历史接口（stock_hk_index_daily_em）按日期索引，7:30 触发受时区/夏令时影响
+    # 易选错行，且早盘前会插入今日占位行；spot 快照返回单一最新值，收盘后到次日开盘前
+    # 始终显示上一交易日收盘，从根本上规避「次日早上数据错」问题。
+    if result["close"] is None:
+        try:
+            import akshare as ak
+            df = _timed(lambda: ak.index_global_spot_em(), "HSI-spot")
+            if df is not None and not df.empty:
+                row = df[df["代码"] == "HSI"]
+                if not row.empty:
+                    r = row.iloc[0]
+                    close = float(r["最新价"])
+                    pct   = float(r["涨跌幅"])
+                    if close > 0:
+                        result["close"] = round(close, 2)
+                        result["pct"] = round(pct, 2)
+                        logger.info(
+                            f"[HSI-spot] 收盘: {close:.2f} ({pct:+.2f}%) "
+                            f"更新: {r.get('最新行情时间','')}"
+                        )
+                if result["close"] is None:
+                    logger.warning("[HSI-spot] 未取到有效 HSI 行")
+        except Exception as e:
+            logger.warning(f"[HSI-spot] 失败: {e}")
+
+    # ── 成交额备：日线接口取最后一个收盘价>0 的有效行（与占位行隔离）──────────
+    if result["turnover_hkd_100m"] is None or result["close"] is None:
+        try:
+            import akshare as ak
+            dfd = _timed(lambda: ak.stock_hk_index_daily_em(symbol="恒生指数"), "HSI-turnover")
+            if dfd is not None and not dfd.empty:
+                close_col = next((c for c in ["收盘", "close", "Close"] if c in dfd.columns), None)
+                amt_col   = next((c for c in ["成交额", "amount", "Amount", "turnover", "Turnover"]
+                                  if c in dfd.columns), None)
+                def _is_positive(v):
+                    try:
+                        return float(v) > 0
+                    except (TypeError, ValueError):
+                        return False
+                # 与收盘价同源的有效行：剔除占位/未收盘行
+                valid = dfd[dfd[close_col].apply(_is_positive)] if close_col else dfd
+                if amt_col and result["turnover_hkd_100m"] is None and not valid.empty:
+                    try:
+                        raw = float(valid.iloc[-1][amt_col])
+                    except (TypeError, ValueError):
+                        raw = 0.0
+                    if raw > 0:
+                        # 恒生指数成交额单位通常为亿港元（raw ≈ 1000-2000）
+                        # 若取到原始元值（raw > 1e10），除以 1e8 换算
+                        result["turnover_hkd_100m"] = round(raw / 1e8 if raw > 1e10 else raw, 2)
+                        logger.info(f"[HSI-turnover] 成交额: {result['turnover_hkd_100m']} 亿港元")
+                # 日线接口顺带兜底收盘价（富途/spot 均失败时）
+                if result["close"] is None and close_col and not valid.empty:
+                    close = float(valid.iloc[-1][close_col])
+                    result["close"] = round(close, 2)
+                    pct_col = next((c for c in ["涨跌幅", "pct_chg", "pct"] if c in dfd.columns), None)
+                    if pct_col:
+                        result["pct"] = round(float(valid.iloc[-1][pct_col]), 2)
+                    elif len(valid) > 1:
+                        prev = float(valid.iloc[-2][close_col])
+                        result["pct"] = round((close - prev) / prev * 100, 2)
+                    logger.info(f"[HSI-daily] 收盘兜底: {close:.2f}")
+        except Exception as e:
+            logger.warning(f"[HSI-turnover] 失败: {e}")
+
+    # ── 收盘价备：yfinance ^HSI ───────────────────────────────────────────────
+    yf_avg_price = None
+    if result["close"] is None:
+        try:
+            import yfinance as yf
+            tk = yf.Ticker("^HSI")
+            hist = tk.history(period="5d")
+            if hist is not None and not hist.empty:
+                row = hist.iloc[-1]
+                close = float(row["Close"])
+                prev = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
+                pct = (close - prev) / prev * 100
+                yf_avg_price = (float(row["High"]) + float(row["Low"])) / 2
+                result.update({"close": round(close, 2), "pct": round(pct, 2)})
+                logger.info(f"[HSI-yfinance] 收盘: {close:.2f}")
+        except Exception as e:
+            logger.warning(f"[HSI-yfinance] {e}")
+            if result["close"] is None:
+                result["error"] = str(e)
+
+    # ── 成交额备1：yfinance 成交量 × 近似均价（仅作兜底） ──────────────────────
+    if result["turnover_hkd_100m"] is None and yf_avg_price is not None:
+        try:
+            # yfinance Volume 为股数，乘均价得港元成交额，再换算为亿港元
+            vol = float(row.get("Volume", 0) or 0)
+            est = vol * yf_avg_price / 1e8
+            if est > 0:
+                result["turnover_hkd_100m"] = round(est, 2)
+                logger.info(f"[HSI-yf-est] 成交额估算: {result['turnover_hkd_100m']} 亿港元")
+        except Exception:
+            pass
+
+    # ── 成交额备2：爬 HKEX 官方市场统计页（新加坡等境外IP可访问）──────────────
+    if result["turnover_hkd_100m"] is None:
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            # HKEX 每日市场统计摘要页（无需登录，境外可访问）
+            hkex_url = "https://www.hkex.com.hk/eng/market/sec_tradinfo/secstat/mktsum.htm"
+            resp = requests.get(hkex_url, timeout=12, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://www.hkex.com.hk/",
+            })
+            soup = BeautifulSoup(resp.text, "lxml")
+            # 找包含"Main Board Turnover"或"总成交额"的表格行
+            for tag in soup.find_all(string=lambda t: t and (
+                "Main Board Turnover" in t or "Turnover" in t
+            )):
+                parent = tag.find_parent("tr")
+                if not parent:
+                    continue
+                cells = parent.find_all("td")
+                for cell in cells:
+                    txt = cell.get_text(strip=True).replace(",", "").replace("HK$", "")
+                    try:
+                        val = float(txt)
+                        if 1e10 < val < 1e14:   # 合理成交额范围（元）
+                            result["turnover_hkd_100m"] = round(val / 1e8, 2)
+                            logger.info(f"[HSI-HKEX] 成交额: {result['turnover_hkd_100m']} 亿港元")
+                            break
+                    except ValueError:
+                        continue
+                if result["turnover_hkd_100m"] is not None:
+                    break
+        except Exception as e:
+            logger.warning(f"[HSI-HKEX] 爬取失败: {e}")
+
     return result
 
 
