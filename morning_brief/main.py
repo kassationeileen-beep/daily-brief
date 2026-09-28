@@ -79,13 +79,16 @@ def build_brief(
 ) -> str:
     date_str = now_hkt.strftime("%Y-%m-%d")           # 今日：用于标题
     date_compact = now_hkt.strftime("%Y%m%d")
-    market_date_str = _prev_trading_day(now_hkt).strftime("%Y-%m-%d")  # 前一交易日：用于第一部分
 
     hsi = market_data.get("hsi") or {}
     sb = market_data.get("southbound") or {}
     ash = market_data.get("a_share") or {}
     n225 = market_data.get("nikkei") or {}
     fx = market_data.get("fx") or {}
+
+    # 前一交易日：优先用 HSI 数据源返回的真实交易日（自动处理港股节假日），
+    # 数据源未返回时回退到「排除周末」的估算
+    market_date_str = hsi.get("trade_date") or _prev_trading_day(now_hkt).strftime("%Y-%m-%d")
 
     # ── 第一部分：核心资金动态 ───────────────────────────────────────────────
     # 恒生指数
@@ -417,14 +420,18 @@ def main():
                 # 须用 "or {}" 确保始终有可操作的 dict
                 hsi = market_data.get("hsi") or {}
                 market_data["hsi"] = hsi
-                if hsi.get("close") is None and db_market["hsi"].get("close") is not None:
+                # 豆包是 LLM 来源，数值可能幻觉，入库前做与 scraper 相同的区间校验
+                from fetchers.market_data import _hsi_close_ok, _hsi_turnover_ok
+                if hsi.get("close") is None and _hsi_close_ok(db_market["hsi"].get("close")):
                     hsi["close"] = db_market["hsi"]["close"]
                     logger.info(f"  [DoubaoMarket] 补充 HSI close: {hsi['close']}")
                 if hsi.get("pct") is None and db_market["hsi"].get("pct") is not None:
                     hsi["pct"] = db_market["hsi"]["pct"]
-                if hsi.get("turnover_hkd_100m") is None and db_market["hsi"].get("turnover_hkd_100m") is not None:
+                if hsi.get("turnover_hkd_100m") is None and _hsi_turnover_ok(db_market["hsi"].get("turnover_hkd_100m")):
                     hsi["turnover_hkd_100m"] = db_market["hsi"]["turnover_hkd_100m"]
                     logger.info(f"  [DoubaoMarket] 补充 HSI 成交额: {hsi['turnover_hkd_100m']} 亿")
+                if hsi.get("trade_date") is None and db_market.get("trading_date"):
+                    hsi["trade_date"] = db_market["trading_date"]
 
                 sb = market_data.get("southbound") or {}
                 market_data["southbound"] = sb

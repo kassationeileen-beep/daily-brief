@@ -44,7 +44,7 @@ def _fetch_hsi_futu() -> dict:
     无时区选行/盘中歧义。turnover 为恒指成分股口径成交额（港元）。
     """
     import os
-    out = {"close": None, "pct": None, "turnover_hkd_100m": None}
+    out = {"close": None, "pct": None, "turnover_hkd_100m": None, "trade_date": None}
     ctx = None
     try:
         from futu import OpenQuoteContext, RET_OK
@@ -65,9 +65,13 @@ def _fetch_hsi_futu() -> dict:
                 out["pct"] = round((close - prev) / prev * 100, 2)
         if turnover > 0:
             out["turnover_hkd_100m"] = round(turnover / 1e8, 2)
+        # update_time 形如 "2026-09-28 16:00:00"，取日期部分
+        upd = str(r.get("update_time", "") or "")
+        if len(upd) >= 10:
+            out["trade_date"] = upd[:10]
         logger.info(
             f"[HSI-futu] 收盘: {out['close']} ({out['pct']:+.2f}%) "
-            f"成交额: {out['turnover_hkd_100m']} 亿港元 更新: {r.get('update_time','')}"
+            f"成交额: {out['turnover_hkd_100m']} 亿港元 日期: {out['trade_date']}"
         )
     except Exception as e:
         logger.warning(f"[HSI-futu] {e}")
@@ -80,26 +84,130 @@ def _fetch_hsi_futu() -> dict:
     return out
 
 
-def fetch_hsi() -> dict:
-    """恒生指数：收盘价、涨跌幅、成交额（亿港元）
-    主：富途 OpenD HK.800000 快照（收盘价+涨跌幅+成交额原子取得，最稳）
-    收盘价备：akshare index_global_spot_em 实时快照 / yfinance ^HSI
-    成交额备：akshare stock_hk_index_daily_em 有效行 / HKEX 官方页面
+# ── 数值合理性校验（拒绝垃圾数据流入早报）────────────────────────────────────
+
+def _hsi_close_ok(v) -> bool:
+    """恒指收盘价合理区间：5000–100000 点"""
+    return v is not None and 5000 < v < 100000
+
+
+def _hsi_turnover_ok(v) -> bool:
+    """恒指成交额合理区间：200–30000 亿港元/日（历史极值均在区间内）"""
+    return v is not None and 200 <= v <= 30000
+
+
+def _fetch_hsi_tencent() -> dict:
+    """腾讯行情 qt.gtimg.cn/q=r_hkHSI（境外直连，无需 key）。
+    收盘价 + 昨收 + 成交额（万港元）+ 行情时间一次原子取得，口径为恒指成分股成交额，
+    与富途主源一致。收盘后到次日开盘前保持上一交易日数据，与 07:30 早报场景匹配。
     """
-    result = {"close": None, "pct": None, "turnover_hkd_100m": None, "error": None}
+    import requests
+    out = {"close": None, "pct": None, "turnover_hkd_100m": None, "trade_date": None}
+    resp = requests.get("https://qt.gtimg.cn/q=r_hkHSI", timeout=10,
+                        headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    text = resp.content.decode("gbk", errors="ignore")
+    payload = text.split('="', 1)[1].rstrip('";\n ')
+    f = payload.split("~")
+    # f[3]=最新价 f[4]=昨收 f[6]=成交额(万港元) f[30]=行情时间 f[31]=涨跌 f[32]=涨跌%
+    close, prev = float(f[3]), float(f[4])
+    if close > 0:
+        out["close"] = round(close, 2)
+        if prev > 0:
+            out["pct"] = round((close - prev) / prev * 100, 2)
+    amount_wan = float(f[6])
+    if amount_wan > 0:
+        out["turnover_hkd_100m"] = round(amount_wan / 1e4, 2)  # 万港元 → 亿港元
+    ts = f[30].strip()  # 形如 "2026/09/28 18:31:27"
+    if len(ts) >= 10:
+        out["trade_date"] = ts[:10].replace("/", "-")
+    logger.info(
+        f"[HSI-tencent] 收盘: {out['close']} ({out['pct']:+.2f}%) "
+        f"成交额: {out['turnover_hkd_100m']} 亿港元 日期: {out['trade_date']}"
+    )
+    return out
 
-    # ── 主：富途 OpenD HK.800000（收盘价+涨跌幅+成交额一次原子取得）────────────
-    futu = _fetch_hsi_futu()
-    if futu["close"] is not None:
-        result["close"] = futu["close"]
-        result["pct"] = futu["pct"]
-    if futu["turnover_hkd_100m"] is not None:
-        result["turnover_hkd_100m"] = futu["turnover_hkd_100m"]
 
-    # ── 收盘价备1：akshare index_global_spot_em（实时快照，无日期选行问题）─────
-    # 日线历史接口（stock_hk_index_daily_em）按日期索引，7:30 触发受时区/夏令时影响
-    # 易选错行，且早盘前会插入今日占位行；spot 快照返回单一最新值，收盘后到次日开盘前
-    # 始终显示上一交易日收盘，从根本上规避「次日早上数据错」问题。
+def _fetch_hsi_sina() -> dict:
+    """新浪行情 hq.sinajs.cn/list=rt_hkHSI（需带 Referer，境外可访问）。
+    收盘价 + 昨收 + 成交额（千港元）+ 日期一次原子取得，口径为恒指成分股成交额。
+    """
+    import requests
+    out = {"close": None, "pct": None, "turnover_hkd_100m": None, "trade_date": None}
+    resp = requests.get(
+        "https://hq.sinajs.cn/list=rt_hkHSI", timeout=10,
+        headers={"Referer": "https://finance.sina.com.cn",
+                 "User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    text = resp.content.decode("gbk", errors="ignore")
+    payload = text.split('="', 1)[1].rstrip('";\n ')
+    f = payload.split(",")
+    # f[2]=今开 f[3]=昨收 f[6]=最新价 f[11]=成交额(千港元) f[17]=日期 f[18]=时间
+    close, prev = float(f[6]), float(f[3])
+    if close > 0:
+        out["close"] = round(close, 2)
+        if prev > 0:
+            out["pct"] = round((close - prev) / prev * 100, 2)
+    amount_qian = float(f[11])
+    if amount_qian > 0:
+        out["turnover_hkd_100m"] = round(amount_qian / 1e5, 2)  # 千港元 → 亿港元
+    d = f[17].strip().replace("/", "-")
+    out["trade_date"] = d or None
+    logger.info(
+        f"[HSI-sina] 收盘: {out['close']} ({out['pct']:+.2f}%) "
+        f"成交额: {out['turnover_hkd_100m']} 亿港元 日期: {out['trade_date']}"
+    )
+    return out
+
+
+def fetch_hsi() -> dict:
+    """恒生指数：收盘价、涨跌幅、成交额（亿港元）、交易日
+    数据源优先级（收盘价与成交额同源原子取得，口径统一为恒指成分股成交额）：
+    1. 富途 OpenD HK.800000 快照（最稳）
+    2. 腾讯行情 qt.gtimg.cn/q=r_hkHSI（境外直连，收盘+成交额+时间一次取得）
+    3. 新浪行情 hq.sinajs.cn/list=rt_hkHSI
+    4. akshare index_global_spot_em（仅收盘价兜底，无成交额；东财接口境外常超时）
+    5. yfinance ^HSI（仅收盘价兜底。绝不用其 Volume 估算成交额：
+       Volume 是成分股股数，乘指数点位量纲错误，实测高估 ~250 倍）
+    每个字段入库前经过合理性校验；trade_date 记录数据所属交易日供早报标题使用。
+    """
+    result = {"close": None, "pct": None, "turnover_hkd_100m": None,
+              "trade_date": None, "error": None}
+
+    def _fill(src: dict, label: str):
+        """逐字段填充：只接受通过合理性校验的值"""
+        if not src:
+            return
+        if result["close"] is None and _hsi_close_ok(src.get("close")):
+            result["close"] = src["close"]
+            result["pct"] = src.get("pct")
+        elif src.get("close") is not None and not _hsi_close_ok(src.get("close")):
+            logger.warning(f"[HSI-{label}] 收盘价 {src.get('close')} 超出合理区间，丢弃")
+        if result["turnover_hkd_100m"] is None and _hsi_turnover_ok(src.get("turnover_hkd_100m")):
+            result["turnover_hkd_100m"] = src["turnover_hkd_100m"]
+        elif src.get("turnover_hkd_100m") is not None and not _hsi_turnover_ok(src.get("turnover_hkd_100m")):
+            logger.warning(f"[HSI-{label}] 成交额 {src.get('turnover_hkd_100m')} 亿港元超出合理区间，丢弃")
+        if result["trade_date"] is None and src.get("trade_date"):
+            result["trade_date"] = src["trade_date"]
+
+    # ── 1. 富途 OpenD HK.800000 ───────────────────────────────────────────────
+    _fill(_fetch_hsi_futu(), "futu")
+
+    # ── 2. 腾讯行情（收盘价+成交额原子取得）────────────────────────────────────
+    if result["close"] is None or result["turnover_hkd_100m"] is None:
+        try:
+            _fill(_fetch_hsi_tencent(), "tencent")
+        except Exception as e:
+            logger.warning(f"[HSI-tencent] 失败: {e}")
+
+    # ── 3. 新浪行情（收盘价+成交额原子取得）────────────────────────────────────
+    if result["close"] is None or result["turnover_hkd_100m"] is None:
+        try:
+            _fill(_fetch_hsi_sina(), "sina")
+        except Exception as e:
+            logger.warning(f"[HSI-sina] 失败: {e}")
+
+    # ── 4. akshare index_global_spot_em（仅收盘价兜底，无成交额）────────────────
     if result["close"] is None:
         try:
             import akshare as ak
@@ -110,7 +218,7 @@ def fetch_hsi() -> dict:
                     r = row.iloc[0]
                     close = float(r["最新价"])
                     pct   = float(r["涨跌幅"])
-                    if close > 0:
+                    if _hsi_close_ok(close):
                         result["close"] = round(close, 2)
                         result["pct"] = round(pct, 2)
                         logger.info(
@@ -122,48 +230,7 @@ def fetch_hsi() -> dict:
         except Exception as e:
             logger.warning(f"[HSI-spot] 失败: {e}")
 
-    # ── 成交额备：日线接口取最后一个收盘价>0 的有效行（与占位行隔离）──────────
-    if result["turnover_hkd_100m"] is None or result["close"] is None:
-        try:
-            import akshare as ak
-            dfd = _timed(lambda: ak.stock_hk_index_daily_em(symbol="恒生指数"), "HSI-turnover")
-            if dfd is not None and not dfd.empty:
-                close_col = next((c for c in ["收盘", "close", "Close"] if c in dfd.columns), None)
-                amt_col   = next((c for c in ["成交额", "amount", "Amount", "turnover", "Turnover"]
-                                  if c in dfd.columns), None)
-                def _is_positive(v):
-                    try:
-                        return float(v) > 0
-                    except (TypeError, ValueError):
-                        return False
-                # 与收盘价同源的有效行：剔除占位/未收盘行
-                valid = dfd[dfd[close_col].apply(_is_positive)] if close_col else dfd
-                if amt_col and result["turnover_hkd_100m"] is None and not valid.empty:
-                    try:
-                        raw = float(valid.iloc[-1][amt_col])
-                    except (TypeError, ValueError):
-                        raw = 0.0
-                    if raw > 0:
-                        # 恒生指数成交额单位通常为亿港元（raw ≈ 1000-2000）
-                        # 若取到原始元值（raw > 1e10），除以 1e8 换算
-                        result["turnover_hkd_100m"] = round(raw / 1e8 if raw > 1e10 else raw, 2)
-                        logger.info(f"[HSI-turnover] 成交额: {result['turnover_hkd_100m']} 亿港元")
-                # 日线接口顺带兜底收盘价（富途/spot 均失败时）
-                if result["close"] is None and close_col and not valid.empty:
-                    close = float(valid.iloc[-1][close_col])
-                    result["close"] = round(close, 2)
-                    pct_col = next((c for c in ["涨跌幅", "pct_chg", "pct"] if c in dfd.columns), None)
-                    if pct_col:
-                        result["pct"] = round(float(valid.iloc[-1][pct_col]), 2)
-                    elif len(valid) > 1:
-                        prev = float(valid.iloc[-2][close_col])
-                        result["pct"] = round((close - prev) / prev * 100, 2)
-                    logger.info(f"[HSI-daily] 收盘兜底: {close:.2f}")
-        except Exception as e:
-            logger.warning(f"[HSI-turnover] 失败: {e}")
-
-    # ── 收盘价备：yfinance ^HSI ───────────────────────────────────────────────
-    yf_avg_price = None
+    # ── 5. yfinance ^HSI（仅收盘价兜底；禁用 Volume 估算成交额）─────────────────
     if result["close"] is None:
         try:
             import yfinance as yf
@@ -174,60 +241,20 @@ def fetch_hsi() -> dict:
                 close = float(row["Close"])
                 prev = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
                 pct = (close - prev) / prev * 100
-                yf_avg_price = (float(row["High"]) + float(row["Low"])) / 2
-                result.update({"close": round(close, 2), "pct": round(pct, 2)})
-                logger.info(f"[HSI-yfinance] 收盘: {close:.2f}")
+                if _hsi_close_ok(close):
+                    result.update({"close": round(close, 2), "pct": round(pct, 2)})
+                    if result["trade_date"] is None:
+                        result["trade_date"] = str(hist.index[-1].date())
+                    logger.info(f"[HSI-yfinance] 收盘: {close:.2f} 日期: {result['trade_date']}")
         except Exception as e:
             logger.warning(f"[HSI-yfinance] {e}")
             if result["close"] is None:
                 result["error"] = str(e)
 
-    # ── 成交额备1：yfinance 成交量 × 近似均价（仅作兜底） ──────────────────────
-    if result["turnover_hkd_100m"] is None and yf_avg_price is not None:
-        try:
-            # yfinance Volume 为股数，乘均价得港元成交额，再换算为亿港元
-            vol = float(row.get("Volume", 0) or 0)
-            est = vol * yf_avg_price / 1e8
-            if est > 0:
-                result["turnover_hkd_100m"] = round(est, 2)
-                logger.info(f"[HSI-yf-est] 成交额估算: {result['turnover_hkd_100m']} 亿港元")
-        except Exception:
-            pass
-
-    # ── 成交额备2：爬 HKEX 官方市场统计页（新加坡等境外IP可访问）──────────────
+    if result["close"] is None and result["error"] is None:
+        result["error"] = "HSI 收盘价所有数据源均失败"
     if result["turnover_hkd_100m"] is None:
-        try:
-            import requests
-            from bs4 import BeautifulSoup
-            # HKEX 每日市场统计摘要页（无需登录，境外可访问）
-            hkex_url = "https://www.hkex.com.hk/eng/market/sec_tradinfo/secstat/mktsum.htm"
-            resp = requests.get(hkex_url, timeout=12, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": "https://www.hkex.com.hk/",
-            })
-            soup = BeautifulSoup(resp.text, "lxml")
-            # 找包含"Main Board Turnover"或"总成交额"的表格行
-            for tag in soup.find_all(string=lambda t: t and (
-                "Main Board Turnover" in t or "Turnover" in t
-            )):
-                parent = tag.find_parent("tr")
-                if not parent:
-                    continue
-                cells = parent.find_all("td")
-                for cell in cells:
-                    txt = cell.get_text(strip=True).replace(",", "").replace("HK$", "")
-                    try:
-                        val = float(txt)
-                        if 1e10 < val < 1e14:   # 合理成交额范围（元）
-                            result["turnover_hkd_100m"] = round(val / 1e8, 2)
-                            logger.info(f"[HSI-HKEX] 成交额: {result['turnover_hkd_100m']} 亿港元")
-                            break
-                    except ValueError:
-                        continue
-                if result["turnover_hkd_100m"] is not None:
-                    break
-        except Exception as e:
-            logger.warning(f"[HSI-HKEX] 爬取失败: {e}")
+        logger.warning("[HSI] 成交额所有数据源均失败，早报将显示 N/A")
 
     return result
 
@@ -416,16 +443,76 @@ def fetch_a_share_indices() -> dict:
     return result
 
 
+def _n225_close_ok(v) -> bool:
+    """日经225 收盘价合理区间：5000–200000 点"""
+    return v is not None and 5000 < v < 200000
+
+
+def _n225_vol_ok(v) -> bool:
+    """日经225 成交量合理区间：0.5–200 亿股/日（东证 Prime 全市场约 10–40 亿股，
+    成分股口径只会更小，区间放宽以容忍长期结构变化）"""
+    return v is not None and 0.5 <= v <= 200
+
+
+def _fetch_n225_futu() -> dict:
+    """日经225：富途 OpenD 快照（JP.N225）。
+    moomoo/futu 前端有日经225指数行情（含成交量），数据经由同一 OpenD 协议，
+    与 HSI 的 HK.800000 同理。volume 为成分股合计股数，/1e8 得亿股。
+    注意：futu 官方文档的行情品类表仅列出 JP 股票/ETF；若当前 OpenD 版本
+    不支持 JP 指数快照（ret != RET_OK），静默降级，成交量维持 None。
+    """
+    import os
+    out = {"close": None, "pct": None, "volume_100m": None}
+    ctx = None
+    try:
+        from futu import OpenQuoteContext, RET_OK
+        host = os.environ.get("FUTU_OPEND_HOST", "127.0.0.1")
+        port = int(os.environ.get("FUTU_OPEND_PORT", "11111"))
+        ctx = OpenQuoteContext(host=host, port=port)
+        for code in ("JP.N225", "JP.NKY"):
+            ret, data = ctx.get_market_snapshot([code])
+            if ret != RET_OK or data is None or data.empty:
+                logger.warning(f"[N225-futu] {code} 快照失败: ret={ret}")
+                continue
+            r = data.iloc[0]
+            close = float(r["last_price"])
+            prev  = float(r["prev_close_price"])
+            vol   = float(r["volume"]) if "volume" in data.columns else 0.0
+            if close > 0:
+                out["close"] = round(close, 2)
+                if prev > 0:
+                    out["pct"] = round((close - prev) / prev * 100, 2)
+            if vol > 0:
+                out["volume_100m"] = round(vol / 1e8, 2)
+            logger.info(
+                f"[N225-futu] {code} 收盘: {out['close']} ({out['pct']:+.2f}%) "
+                f"成交量: {out['volume_100m']} 亿股 更新: {r.get('update_time','')}"
+            )
+            return out
+    except Exception as e:
+        logger.warning(f"[N225-futu] {e}")
+    finally:
+        if ctx:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+    return out
+
+
 def fetch_nikkei225() -> dict:
-    """日经225：收盘价、涨跌幅。
-    主：日本经济新闻社（Nikkei Inc.）官方指数日线 CSV（指数编制方，最权威）
-    备1：akshare index_global_spot_em（东财全球指数实时快照）
-    备2：yfinance ^N225（Volume 固定为0，Futu 亦不支持 JP 指数）
-    成交量无权威免费源，volume_100m 固定为 None。
+    """日经225：收盘价、涨跌幅、成交量（亿股）。
+    收盘价主：日本经济新闻社（Nikkei Inc.）官方指数日线 CSV（指数编制方，最权威）
+    收盘价备：富途 OpenD JP.N225 → akshare index_global_spot_em → yfinance ^N225
+    成交量：富途 OpenD JP.N225 快照（moomoo/futu 前端同源；OpenD 不支持 JP 指数时
+    降级为 None）。yfinance ^N225 的 Volume 延迟一天且口径可疑，不使用。
     """
     result = {"close": None, "pct": None, "volume_100m": None, "error": None}
 
-    # ── 主：Nikkei Inc. 官方指数日线 CSV ──────────────────────────────────────
+    # 富途快照先行：一次连接同时提供收盘价备源 + 成交量主源
+    futu = _fetch_n225_futu()
+
+    # ── 收盘价主：Nikkei Inc. 官方指数日线 CSV ────────────────────────────────
     # 日经225 由日本经济新闻社编制并发布，此 CSV 是权威原始来源。
     # 列序：日期, 終値(收盘), 始値, 高値, 安値。文件为 Shift-JIS，数据行均 ASCII。
     # 取最后一行即最近交易日官方收盘：收盘后到次日东京开盘(9:00 JST=8:00 HKT)前，
@@ -451,49 +538,60 @@ def fetch_nikkei225() -> dict:
                 pct = (close - prev) / prev * 100
                 result.update({"close": round(close, 2), "pct": round(pct, 2)})
                 logger.info(f"[N225-official] 收盘: {close:.2f} ({pct:+.2f}%) 日期: {date_str}")
-                return result
-        logger.warning("[N225-official] CSV 行数不足或解析失败")
+        else:
+            logger.warning("[N225-official] CSV 行数不足或解析失败")
     except Exception as e:
         logger.warning(f"[N225-official] {e}")
 
-    # ── 备1：akshare 东财全球指数实时快照 ─────────────────────────────────────
-    try:
-        import akshare as ak
-        df = ak.index_global_spot_em()
-        row = df[df["代码"] == "N225"]
-        if not row.empty:
-            r = row.iloc[0]
-            close = float(r["最新价"])
-            prev  = float(r["昨收价"])
-            pct   = float(r["涨跌幅"])
-            logger.info(f"[N225-akshare] 收盘: {close:.2f} ({pct:+.2f}%) 更新: {r.get('最新行情时间','')}")
-            result.update({"close": round(close, 2), "pct": round(pct, 2)})
-            return result
-    except Exception as e:
-        logger.warning(f"[N225-akshare] {e}")
+    # ── 收盘价备1：富途 OpenD JP.N225（与成交量同源）──────────────────────────
+    if result["close"] is None and _n225_close_ok(futu.get("close")):
+        result["close"], result["pct"] = futu["close"], futu["pct"]
+        logger.info(f"[N225] 收盘价采用富途: {result['close']}")
 
-    # 备：yfinance（显式日期范围避免缓存错误）
-    try:
-        import yfinance as yf
-        from datetime import date as date_type, timedelta as td
-        tk = yf.Ticker("^N225")
-        end   = (date_type.today() + td(days=1)).strftime("%Y-%m-%d")
-        start = (date_type.today() - td(days=14)).strftime("%Y-%m-%d")
-        hist = tk.history(start=start, end=end)
-        if hist.empty:
-            raise ValueError("空数据")
-        row  = hist.iloc[-1]
-        close = float(row["Close"])
-        prev  = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
-        pct   = (close - prev) / prev * 100
-        logger.info(f"[N225-yf] 收盘: {close:.2f} ({pct:+.2f}%)")
-        result.update({
-            "close": round(close, 2),
-            "pct": round(pct, 2),
-        })
-    except Exception as e:
-        result["error"] = str(e)
-        logger.warning(f"[N225] {e}")
+    # ── 收盘价备2：akshare 东财全球指数实时快照 ───────────────────────────────
+    if result["close"] is None:
+        try:
+            import akshare as ak
+            df = ak.index_global_spot_em()
+            row = df[df["代码"] == "N225"]
+            if not row.empty:
+                r = row.iloc[0]
+                close = float(r["最新价"])
+                pct   = float(r["涨跌幅"])
+                if _n225_close_ok(close):
+                    logger.info(f"[N225-akshare] 收盘: {close:.2f} ({pct:+.2f}%) 更新: {r.get('最新行情时间','')}")
+                    result.update({"close": round(close, 2), "pct": round(pct, 2)})
+        except Exception as e:
+            logger.warning(f"[N225-akshare] {e}")
+
+    # ── 收盘价备3：yfinance（显式日期范围避免缓存错误）────────────────────────
+    if result["close"] is None:
+        try:
+            import yfinance as yf
+            from datetime import date as date_type, timedelta as td
+            tk = yf.Ticker("^N225")
+            end   = (date_type.today() + td(days=1)).strftime("%Y-%m-%d")
+            start = (date_type.today() - td(days=14)).strftime("%Y-%m-%d")
+            hist = tk.history(start=start, end=end)
+            if hist.empty:
+                raise ValueError("空数据")
+            row  = hist.iloc[-1]
+            close = float(row["Close"])
+            prev  = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else close
+            pct   = (close - prev) / prev * 100
+            if _n225_close_ok(close):
+                logger.info(f"[N225-yf] 收盘: {close:.2f} ({pct:+.2f}%)")
+                result.update({"close": round(close, 2), "pct": round(pct, 2)})
+        except Exception as e:
+            result["error"] = str(e)
+            logger.warning(f"[N225] {e}")
+
+    # ── 成交量：富途快照（校验后入库）────────────────────────────────────────
+    if _n225_vol_ok(futu.get("volume_100m")):
+        result["volume_100m"] = futu["volume_100m"]
+    elif futu.get("volume_100m") is not None:
+        logger.warning(f"[N225-futu] 成交量 {futu['volume_100m']} 亿股超出合理区间，丢弃")
+
     return result
 
 
