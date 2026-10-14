@@ -445,7 +445,8 @@ def refine_all_stocks(
 
     for market, stocks in [("hk", all_news.get("hk", {})),
                             ("a",  all_news.get("a", {})),
-                            ("us", all_news.get("us", {}))]:
+                            ("us", all_news.get("us", {})),
+                            ("global", all_news.get("global", {}))]:
         is_us = (market == "us")
         for code, info in stocks.items():
             name = info.get("name", code)

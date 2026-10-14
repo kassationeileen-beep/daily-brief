@@ -656,7 +656,44 @@ def fetch_fx_and_commodities() -> dict:
 # 统一入口
 # ─────────────────────────────────────────────
 
-def fetch_all_market_data() -> dict:
+def fetch_us_indices(now_hkt: Optional[datetime] = None) -> dict:
+    """美股日线：仅取香港报告日之前的交易日，逐指数保留真实日期。
+
+    适用于香港早间日报；节假日回退到最近有效收盘，不用指数成交量估算资金流。
+    """
+    from datetime import timezone
+    from math import isfinite
+
+    cutoff = (now_hkt or datetime.now(timezone(timedelta(hours=8)))).date()
+    result = {}
+    for key, symbol in {"sp500": "^GSPC", "nasdaq": "^IXIC"}.items():
+        item = {"close": None, "pct": None, "trade_date": None, "error": None}
+        result[key] = item
+        try:
+            import yfinance as yf
+            hist = yf.Ticker(symbol).history(
+                start=(cutoff - timedelta(days=30)).isoformat(),
+                end=cutoff.isoformat(), auto_adjust=False, timeout=15,
+            )
+            if hist is None or hist.empty:
+                raise ValueError("无日线数据")
+            hist = hist.sort_index()
+            hist = hist[hist.index.date < cutoff]
+            closes = hist["Close"].dropna()
+            closes = closes[closes.map(lambda v: isfinite(float(v)) and float(v) > 0)]
+            if closes.empty:
+                raise ValueError("无有效收盘价")
+            item["close"] = round(float(closes.iloc[-1]), 2)
+            item["trade_date"] = closes.index[-1].date().isoformat()
+            if len(closes) >= 2:
+                item["pct"] = round((float(closes.iloc[-1]) / float(closes.iloc[-2]) - 1) * 100, 2)
+        except Exception as e:
+            item["error"] = str(e)
+            logger.warning(f"[US/{symbol}] 获取失败: {e}")
+    return result
+
+
+def fetch_all_market_data(now_hkt: Optional[datetime] = None) -> dict:
     """抓取所有行情数据，返回结构化字典"""
     logger.info("开始抓取市场数据...")
     data = {}
@@ -665,6 +702,7 @@ def fetch_all_market_data() -> dict:
     data["southbound"] = _safe(fetch_southbound_flow, "南向资金")
     data["a_share"] = _safe(fetch_a_share_indices, "A股")
     data["nikkei"] = _safe(fetch_nikkei225, "日经225")
+    data["us"] = _safe(lambda: fetch_us_indices(now_hkt), "美股指数")
 
     logger.info("抓取汇率数据...")
     data["fx"] = _safe(fetch_fx_and_commodities, "FX")

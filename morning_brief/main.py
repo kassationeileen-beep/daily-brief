@@ -140,6 +140,18 @@ def build_brief(
     if n225.get("error") and not n225.get("close"):
         nikkei_block = warn("日經225") + "\n"
 
+    # 美股日期独立于港股，节假日可能不同。
+    us = market_data.get("us") or {}
+    us_lines = ["4. 美股（各指數交易日如下）"]
+    for key, label in [("sp500", "標普500指數"), ("nasdaq", "納斯達克綜合指數")]:
+        index = us.get(key) or {}
+        trade_date = index.get("trade_date") or "日期未取得"
+        us_lines.append(
+            f"- {label}（{trade_date}）：{fmt_num(index.get('close'))} 點"
+            f"（{fmt_pct(index.get('pct'))}）"
+        )
+    us_block = "\n".join(us_lines) + "\n"
+
     # ── 第二部分：关键汇率 ────────────────────────────────────────────────────
     def fxv(key, decimals=4):
         v = fx.get(key)
@@ -183,7 +195,7 @@ WTI原油：{fxv("WTI", 2)}"""
     # ── 拼接完整早报 ──────────────────────────────────────────────────────────
     brief = f"""Good Morning, {date_compact} Daily Brief
 ▶️一、*{market_date_str}核心資金動態*
-{hsi_block}{a_block}{nikkei_block}
+{hsi_block}{a_block}{nikkei_block}{us_block}
 {fx_block}
 
 {macro_block}
@@ -397,7 +409,7 @@ def main():
     logger.info("Step 1: 抓取市场数据（结构化 scraper）")
     try:
         from fetchers.market_data import fetch_all_market_data
-        market_data = fetch_all_market_data()
+        market_data = fetch_all_market_data(now_hkt=now_hkt)
     except Exception as e:
         logger.error(f"市场数据模块失败: {e}")
         market_data = {}

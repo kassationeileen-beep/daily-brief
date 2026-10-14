@@ -94,6 +94,11 @@ _CN_TO_CODE: dict[str, str] = {
     "特斯拉": "TSLA",
     "英特爾": "INTC", "英特尔": "INTC",
     "Meta": "META",
+    "三星": "SAMSUNG", "三星電子": "SAMSUNG", "三星电子": "SAMSUNG",
+    "海力士": "SKHYNIX",
+    "台積電": "TSM", "台积电": "TSM",
+    "貝殼": "BEKE", "贝壳": "BEKE",
+    "萬國數據": "GDS", "万国数据": "GDS",
 }
 
 
@@ -234,6 +239,10 @@ def _parse_message(text: str) -> dict:
                 section = "stocks"
 
         # 美股 ticker
+        for tag in re.findall(r"#(SpaceX|Samsung|SKHynix)\b", line, flags=re.IGNORECASE):
+            company_tags.append(tag.upper())
+            if section not in ("macro", "ipo"):
+                section = "stocks"
         for m in _US_TICKER_RE.findall(line):
             full = f"#{m}"
             if full not in _KNOWN_NON_COMPANY:
