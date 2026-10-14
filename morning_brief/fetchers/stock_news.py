@@ -102,6 +102,16 @@ US_STOCKS = {
     "META": "Meta",
     "NVDA": "英偉達",
     "TSLA": "特斯拉",
+    "TSM": "台積電",
+    "BEKE": "貝殼",
+    "GDS": "萬國數據",
+}
+
+# 按公司名称搜索，不依赖股票代码或上市状态。
+GLOBAL_COMPANIES = {
+    "SAMSUNG": "三星電子",
+    "SKHYNIX": "SK海力士",
+    "SPACEX": "SpaceX",
 }
 
 
@@ -421,7 +431,7 @@ def fetch_all_stock_news(request_interval: float = 1.5) -> dict:
       "us":  {"AAPL": {"name": "蘋果", "news": [...]}},
     }
     """
-    result = {"hk": {}, "a": {}, "us": {}}
+    result = {"hk": {}, "a": {}, "us": {}, "global": {}}
 
     logger.info(f"抓取港股新闻（{len(HK_STOCKS)} 只）...")
     for code, name in HK_STOCKS.items():
@@ -449,5 +459,10 @@ def fetch_all_stock_news(request_interval: float = 1.5) -> dict:
         result["us"][ticker] = {"name": name, "news": news}
         logger.debug(f"  {ticker} {name}: {len(news)} 条")
         time.sleep(0.5)
+
+    for key, name in GLOBAL_COMPANIES.items():
+        news = fetch_futu_news(name, size=10, lang="zh-HK")
+        result["global"][key] = {"name": name, "news": _dedupe_news_items(news)}
+        time.sleep(request_interval)
 
     return result
